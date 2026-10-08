@@ -7,6 +7,8 @@
 
 **Your personal data kit for agents.** A commonplace book for the age of agents.
 
+[Website](https://avgvstvs96.github.io/commonplace/) · [Start](#start) · [Sources](#sources) · [How it works](#how-it-works)
+
 People like Bacon and Locke kept a commonplace book: one notebook for everything they read, saved and thought, added to for life. commonplace is yours, except it keeps itself. It copies everything you've made, saved and said into a private archive on your machine, keeps it current, and gives every agent you use one safe door to it.
 
 Not just your GitHub. Your texts, your mail, your review comments, what you watched, what you saved, what you liked, every prompt you ever typed. That's where your taste and your judgment actually live, and an agent that can search it stops guessing what you mean.
