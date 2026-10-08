@@ -1,0 +1,22 @@
+{
+  "name": "commonplace",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Your personal data kit for agents: a private, always-current archive of your digital life, behind one CLI and MCP server.",
+  "license": "MIT",
+  "bin": {
+    "commonplace": "src/cli.ts"
+  },
+  "type": "module",
+  "scripts": {
+    "check": "tsc -p . && oxlint --type-aware && oxfmt --check && bun test",
+    "fix": "oxlint --type-aware --fix && oxfmt"
+  },
+  "devDependencies": {
+    "@types/bun": "1.4.2",
+    "oxfmt": "0.72.0",
+    "oxlint": "1.87.0",
+    "oxlint-tsgolint": "7.0.2003",
+    "typescript": "7.0.2"
+  }
+}

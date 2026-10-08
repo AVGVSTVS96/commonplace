@@ -1,0 +1,16 @@
+{
+  "name": "commonplace",
+  "owner": {
+    "name": "AVGVSTVS96"
+  },
+  "metadata": {
+    "description": "commonplace: a commonplace book for the age of agents."
+  },
+  "plugins": [
+    {
+      "name": "commonplace",
+      "source": "./",
+      "description": "Your personal data kit for agents: search your own archive over MCP, keep it current, and add sources."
+    }
+  ]
+}

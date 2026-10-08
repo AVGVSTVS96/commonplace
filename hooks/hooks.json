@@ -1,0 +1,14 @@
+{
+  "hooks": {
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "command -v commonplace >/dev/null && (nohup commonplace sync >/dev/null 2>&1 &) || true"
+          }
+        ]
+      }
+    ]
+  }
+}

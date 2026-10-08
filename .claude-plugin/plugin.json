@@ -1,0 +1,13 @@
+{
+  "name": "commonplace",
+  "version": "0.1.0",
+  "description": "Your personal data kit for agents: search your own archive over MCP, keep it current, and add sources.",
+  "author": { "name": "AVGVSTVS96", "url": "https://github.com/AVGVSTVS96" },
+  "homepage": "https://github.com/AVGVSTVS96/commonplace",
+  "repository": "https://github.com/AVGVSTVS96/commonplace",
+  "license": "MIT",
+  "keywords": ["personal-data", "archive", "mcp", "sqlite", "memory"],
+  "mcpServers": {
+    "commonplace": { "command": "commonplace", "args": ["mcp"] }
+  }
+}
