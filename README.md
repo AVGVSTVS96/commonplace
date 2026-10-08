@@ -35,10 +35,11 @@ It's a template you own, not an app you install: about a thousand lines of TypeS
 
 ### Built in
 
-| source    | what                                              | needs                   |
-| --------- | ------------------------------------------------- | ----------------------- |
-| `github`  | your pull requests, issues and stars              | `gh` signed in          |
-| `prompts` | every prompt you typed into Claude Code and Codex | nothing, read from disk |
+| source     | what                                              | needs                                     |
+| ---------- | ------------------------------------------------- | ----------------------------------------- |
+| `github`   | your pull requests, issues and stars              | `gh` signed in                            |
+| `prompts`  | every prompt you typed into Claude Code and Codex | nothing, read from disk                   |
+| `imessage` | every iMessage and SMS conversation               | macOS, Full Disk Access for your terminal |
 
 ### Coming built in
 
@@ -46,7 +47,6 @@ It's a template you own, not an app you install: about a thousand lines of TypeS
 | -------------- | -------------------------------------------------- | ------------------------------------------- |
 | X archive      | your posts, likes, DMs and Grok chats, all of them | the archive you download from X's settings  |
 | X              | new posts, likes and bookmarks every day           | an X developer app (pay per use, cents/day) |
-| iMessage       | your conversations                                 | macOS, Full Disk Access                     |
 | Google Takeout | searches, YouTube, Maps, Chrome, Calendar          | a Takeout export                            |
 | Raindrop       | bookmarks and collections                          | a CSV export or API token                   |
 
@@ -120,15 +120,18 @@ The MCP server has four tools, `search`, `timeline`, `show` and `stats`, over th
 ```ts
 export default defineConfig({
   // strongest first: when two sources disagree on a field, the earlier one wins
-  sources: [github, prompts],
+  sources: [github, prompts, imessage()],
 
   // what MCP clients may read; `commonplace mcp --sources github` narrows it per client
+  // messages stay local until you add "imessage" here
   mcp: ["github", "prompts"],
 
   // rows that never reach the archive
   redact: (row) => row.type === "event" && /\b(password|api[_ -]?key|secret)\b/i.test(row.text ?? ""),
 });
 ```
+
+Some sources take options. `imessage({ drop: (message, chat) => … })` keeps matching messages out of the snapshot itself, so they never exist anywhere but Messages.
 
 ## How it works
 
