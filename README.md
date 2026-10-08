@@ -1,4 +1,9 @@
-# commonplace
+<h1>
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset=".github/assets/commonplace-dark.svg">
+    <img alt="commonplace" src=".github/assets/commonplace.svg" width="320">
+  </picture>
+</h1>
 
 **Your personal data kit for agents.** A commonplace book for the age of agents.
 
