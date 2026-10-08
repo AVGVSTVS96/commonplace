@@ -8,6 +8,8 @@ export const onceVerbs = ["saved", "liked", "followed", "posted", "opened"] as c
 /** Can happen any number of times. Each one is its own event. */
 export const repeatVerbs = [
   "prompted",
+  "charged",
+  "paid",
   "sent",
   "received",
   "committed",
