@@ -20,6 +20,37 @@ commonplace     CLI ─── search · timeline · show · stats
 - **One shape for everything.** Every source becomes things, events, and links, with IDs derived from content, so the same page saved in two apps is one record.
 - **Agents add the sources.** The `add-source` skill teaches your agent to write a new source for any app or export you have.
 
+## Sources
+
+### Built in: zero setup
+
+| source    | what                                              | needs                   |
+| --------- | ------------------------------------------------- | ----------------------- |
+| `github`  | your pull requests, issues, and stars             | `gh` signed in          |
+| `prompts` | every prompt you typed into Claude Code and Codex | nothing, read from disk |
+
+### Coming built in
+
+| source         | what                                                | needs                                       |
+| -------------- | --------------------------------------------------- | ------------------------------------------- |
+| X archive      | your posts, likes, DMs, and Grok chats, all of them | the archive you download from X's settings  |
+| X              | new posts, likes, and bookmarks every day           | an X developer app (pay per use, cents/day) |
+| iMessage       | your conversations                                  | macOS, Full Disk Access                     |
+| Google Takeout | searches, YouTube, Maps, Chrome, Calendar           | a Takeout export                            |
+| Raindrop       | bookmarks and collections                           | a CSV export or API token                   |
+
+### One ask away
+
+Anything with an export, a local database, an API, or a CLI. Ask your agent, _"add my Obsidian vault to commonplace"_, and the `add-source` skill has it write the source: one file, usually under 80 lines.
+
+- **Browsing:** Chrome, Safari, Arc, or Dia history
+- **Notes:** Obsidian or any folder of markdown, Apple Notes
+- **Mail and calendar:** Gmail via Takeout, any `.ics`
+- **Chat:** Slack, Discord, and Telegram exports
+- **Reading and media:** Readwise, Pocket, Goodreads, Letterboxd, Spotify, Reddit exports
+
+[`skills/add-source/SKILL.md`](skills/add-source/SKILL.md) works for any agent that reads files, not just Claude Code.
+
 ## Start
 
 You need [Bun](https://bun.sh) and, for the GitHub source, the [GitHub CLI](https://cli.github.com) signed in.
@@ -61,15 +92,6 @@ commonplace mcp                MCP server on stdio  --sources a,b to narrow what
 commonplace sql <query>        read-only SQL, local only
 ```
 
-## Sources
-
-| source    | what                                              | how                      |
-| --------- | ------------------------------------------------- | ------------------------ |
-| `github`  | your pull requests, issues, and stars             | `gh` CLI                 |
-| `prompts` | every prompt you typed into Claude Code and Codex | their local session logs |
-
-Adding one is a single file. In Claude Code, ask for it: _"add my Raindrop bookmarks to commonplace"_. The `add-source` skill walks your agent through it, and [`skills/add-source/SKILL.md`](skills/add-source/SKILL.md) works for any agent that reads files.
-
 ## Configure
 
 `commonplace.config.ts` is yours to edit:
@@ -97,6 +119,6 @@ export default defineConfig({
 ## Next
 
 - Remote MCP for ChatGPT and claude.ai on the web
-- More sources: X, iMessage, browser history, Google Takeout, Raindrop
+- The "coming built in" sources above
 
 MIT
