@@ -15,6 +15,10 @@ import type { Config } from "./config.ts";
 
 const today = (): string => new Date().toLocaleDateString("sv");
 
+const days = (from: string, to: string): number => (Date.parse(to) - Date.parse(from)) / 86_400_000;
+
+export const stateOf = (data: string, source: string): string => `${data}/state/${source}`;
+
 const alive = (pid: number): boolean => {
   try {
     process.kill(pid, 0);
@@ -63,7 +67,7 @@ export interface Synced {
 }
 
 /**
- * Takes today's snapshot of every source that fetches and has none yet today, then rebuilds.
+ * Takes today's snapshot of every source that fetches and is due, then rebuilds.
  * Safe to call from as many hooks as you like: a running sync makes the others return null.
  */
 export const sync = (config: Config, data: string, log: (line: string) => void): Promise<Synced | null> => {
@@ -78,7 +82,10 @@ export const sync = (config: Config, data: string, log: (line: string) => void):
     for (const source of config.sources) {
       const previous = snapshotsOf(raw, source.name).at(-1);
 
-      if (source.fetch === undefined || previous?.date === date) {
+      if (
+        source.fetch === undefined ||
+        (previous !== undefined && days(previous.date, date) < (source.every ?? 1))
+      ) {
         continue;
       }
 
@@ -89,7 +96,11 @@ export const sync = (config: Config, data: string, log: (line: string) => void):
       log(`fetch ${source.name}`);
 
       try {
-        await source.fetch({ dir: partial, since: previous?.date ?? null });
+        await source.fetch({
+          dir: partial,
+          since: previous?.date ?? null,
+          state: stateOf(data, source.name),
+        });
         readOnly(partial);
         renameSync(partial, final);
         fetched.push(source.name);

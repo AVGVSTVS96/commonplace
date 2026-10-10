@@ -15,12 +15,18 @@ export interface FetchContext {
   readonly dir: string;
   /** The date of this source's last snapshot, so fetch can take only what's new. Null on the first run. */
   readonly since: string | null;
+  /** A private directory this source keeps between runs, for things like a signed-in session. Never in a snapshot. */
+  readonly state: string;
 }
 
 export interface Source {
   readonly name: string;
   /** Copies what the service gives you into `dir`, as close to raw as you can. Omit for one-time exports you drop in by hand. */
   readonly fetch?: (context: FetchContext) => Promise<void>;
+  /** Days between snapshots. Defaults to 1. */
+  readonly every?: number;
+  /** Gets this source signed in, for `commonplace signin <name>`. */
+  readonly signin?: (context: Pick<FetchContext, "state">) => Promise<void>;
   /** Turns one snapshot into rows. Pure: reads only the snapshot, no clock, no network. */
   readonly rows: (snapshot: Snapshot) => AsyncIterable<Row> | Iterable<Row>;
 }

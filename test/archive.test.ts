@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readdirSync, statSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 
 import { build, paths } from "../src/build.ts";
@@ -151,4 +151,29 @@ test("sync snapshots each source once a day, read-only, and leaves nothing behin
   expect(calls).toBe(1);
   expect(statSync(`${paths(data).raw}/notes/${date}/rows.jsonl`).mode & 0o222).toBe(0);
   expect(readdirSync(`${paths(data).raw}/broken`)).toEqual([]);
+});
+
+const daysAgo = (days: number) => new Date(Date.now() - days * 86_400_000).toLocaleDateString("sv");
+
+test("a source with `every` waits that many days, and gets its own state directory", async () => {
+  const data = mkdtempSync(`${tmpdir()}/commonplace-`);
+  const states: Array<string> = [];
+  const weekly = defineSource({
+    name: "weekly",
+    every: 7,
+    fetch: async ({ dir, state }) => {
+      states.push(state);
+      writeFileSync(`${dir}/rows.jsonl`, "");
+    },
+    rows: () => [],
+  });
+  const only = defineConfig({ sources: [weekly], mcp: [] });
+
+  snapshot(data, "weekly", daysAgo(6), []);
+  expect((await sync(only, data, () => {}))?.fetched).toEqual([]);
+
+  snapshot(data, "weekly", daysAgo(7), []);
+  rmSync(`${paths(data).raw}/weekly/${daysAgo(6)}`, { recursive: true });
+  expect((await sync(only, data, () => {}))?.fetched).toEqual(["weekly"]);
+  expect(states).toEqual([`${data}/state/weekly`]);
 });

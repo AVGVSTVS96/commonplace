@@ -8,7 +8,7 @@ import pkg from "../package.json";
 import { build, paths, report } from "./build.ts";
 import { serve } from "./mcp.ts";
 import { type Hit, open } from "./store.ts";
-import { sync } from "./sync.ts";
+import { stateOf, sync } from "./sync.ts";
 
 const usage = `commonplace: your personal data kit for agents
 
@@ -18,6 +18,7 @@ const usage = `commonplace: your personal data kit for agents
   commonplace stats              sources, freshness, kinds, verbs
   commonplace sync               snapshot every source due today, then rebuild
   commonplace build              rebuild the database from data/raw
+  commonplace signin <source>    sign a source in to its account
   commonplace mcp                MCP server on stdio  --sources a,b to narrow what a client sees
   commonplace sql <query>        read-only SQL, local only
   commonplace root               where this commonplace lives
@@ -118,6 +119,14 @@ switch (values.help === true ? "help" : (command ?? "help")) {
     const built = await build(config, data);
     console.log(report(built));
     process.exitCode = built.outcomes.some((o) => o.error !== null) ? 1 : 0;
+    break;
+  }
+  case "signin": {
+    const signs = config.sources.filter((s) => s.signin !== undefined);
+    const source =
+      signs.find((s) => s.name === rest[0]) ??
+      fail(`Usage: commonplace signin <source>, one of: ${signs.map((s) => s.name).join(", ") || "none"}`);
+    await source.signin?.({ state: stateOf(data, source.name) });
     break;
   }
   case "mcp": {
