@@ -1,10 +1,16 @@
-import { timingSafeEqual } from "node:crypto";
+import { Database } from "bun:sqlite";
+import { createDecipheriv, pbkdf2Sync, timingSafeEqual } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, watch } from "node:fs";
 import { basename, dirname } from "node:path";
 
 import type { ServerWebSocket, Socket } from "bun";
 
 const token = process.env["BOX_TOKEN"] ?? "";
+/**
+ * A login page to open for a person. Sites refuse sign-ins from a browser DevTools controls, so a sign-in
+ * box runs Chrome without it and reads the session from Chrome's own cookie store instead.
+ */
+const signin = process.env["BOX_SIGNIN"];
 const display = ":1";
 const vncPort = 5901;
 const profile = `${process.env["HOME"]}/profile`;
@@ -14,8 +20,12 @@ if (token.length < 32) {
   throw new Error("BOX_TOKEN must be at least 32 characters");
 }
 
-const appears = (path: string): Promise<void> =>
-  new Promise((resolve) => {
+const appears = async (path: string): Promise<void> => {
+  if (!existsSync(dirname(path))) {
+    await appears(dirname(path));
+  }
+
+  return new Promise((resolve) => {
     const watcher = watch(dirname(path), (_, name) => {
       if (name === basename(path) && existsSync(path)) {
         watcher.close();
@@ -27,6 +37,7 @@ const appears = (path: string): Promise<void> =>
       resolve();
     }
   });
+};
 
 const must = (child: Bun.Subprocess, name: string) =>
   void child.exited.then((code) => {
@@ -49,7 +60,7 @@ must(
     [
       "google-chrome-stable",
       `--user-data-dir=${profile}`,
-      "--remote-debugging-port=0",
+      ...(signin === undefined ? ["--remote-debugging-port=0"] : []),
       "--no-first-run",
       "--no-default-browser-check",
       "--password-store=basic",
@@ -57,15 +68,67 @@ must(
       "--disable-dev-shm-usage",
       "--window-position=0,0",
       "--window-size=1440,900",
+      ...(signin === undefined ? [] : [signin]),
     ],
     { env: { ...process.env, DISPLAY: display }, stdio: ["ignore", "inherit", "inherit"] },
   ),
   "chrome",
 );
-await appears(`${profile}/DevToolsActivePort`);
 
-const [port, path] = readFileSync(`${profile}/DevToolsActivePort`, "utf8").split("\n");
-const devtools = `ws://127.0.0.1:${port}${path}`;
+const devtools = async (): Promise<string> => {
+  await appears(`${profile}/DevToolsActivePort`);
+  const [port, path] = readFileSync(`${profile}/DevToolsActivePort`, "utf8").split("\n");
+
+  return `ws://127.0.0.1:${port}${path}`;
+};
+const upstream = signin === undefined ? await devtools() : null;
+
+/** Chrome's "basic" password store encrypts cookies with this fixed key, so only the file's permissions guard them. */
+const cookieKey = pbkdf2Sync("peanuts", "saltysalt", 1, 16, "sha1");
+const cookieStore = `${profile}/Default/Cookies`;
+const sameSite = ["None", "Lax", "Strict"];
+
+interface StoredCookie {
+  readonly host_key: string;
+  readonly name: string;
+  readonly path: string;
+  readonly encrypted_value: Uint8Array;
+  readonly expires_utc: number;
+  readonly has_expires: number;
+  readonly is_httponly: number;
+  readonly is_secure: number;
+  readonly samesite: number;
+}
+
+/** Every saved cookie, in the shape DevTools uses. Values carry a SHA-256 of their host in front. */
+const cookies = () => {
+  const db = new Database(cookieStore, { readonly: true });
+  try {
+    return db
+      .query<StoredCookie, []>("SELECT * FROM cookies")
+      .all()
+      .map((cookie) => {
+        const decipher = createDecipheriv("aes-128-cbc", cookieKey, Buffer.alloc(16, " "));
+        const value = Buffer.concat([
+          decipher.update(cookie.encrypted_value.subarray(3)),
+          decipher.final(),
+        ]).subarray(32);
+
+        return {
+          name: cookie.name,
+          value: value.toString(),
+          domain: cookie.host_key,
+          path: cookie.path,
+          expires: cookie.has_expires === 1 ? cookie.expires_utc / 1e6 - 11_644_473_600 : -1,
+          httpOnly: cookie.is_httponly === 1,
+          secure: cookie.is_secure === 1,
+          sameSite: sameSite[cookie.samesite],
+        };
+      });
+  } finally {
+    db.close();
+  }
+};
 
 const allowed = (url: URL): boolean => {
   const given = Buffer.from(url.searchParams.get("token") ?? "");
@@ -74,7 +137,7 @@ const allowed = (url: URL): boolean => {
 };
 
 interface Pipe {
-  readonly kind: "cdp" | "vnc";
+  readonly kind: "cdp" | "cookies" | "vnc";
   pending: Array<string | Buffer>;
   send?: (message: string | Buffer) => void;
   close?: () => void;
@@ -96,12 +159,12 @@ Bun.serve<Pipe>({
   fetch: (request, server) => {
     const url = new URL(request.url);
 
-    if (url.pathname === "/cdp" || url.pathname === "/websockify") {
+    const kind = ({ "/cdp": "cdp", "/cookies": "cookies", "/websockify": "vnc" } as const)[url.pathname];
+
+    if (kind === "vnc" || kind === (signin === undefined ? "cdp" : "cookies")) {
       if (!allowed(url)) {
         return new Response("Forbidden", { status: 403 });
       }
-
-      const kind = url.pathname === "/cdp" ? "cdp" : "vnc";
 
       return server.upgrade(request, { data: { kind, pending: [] } })
         ? undefined
@@ -117,15 +180,35 @@ Bun.serve<Pipe>({
 
   websocket: {
     open: (ws) => {
-      if (ws.data.kind === "cdp") {
+      if (ws.data.kind === "cookies") {
         controllers += 1;
-        const upstream = new WebSocket(devtools);
-        upstream.addEventListener("message", (event) => ws.send(event.data as string));
-        upstream.addEventListener("close", () => ws.close());
-        upstream.addEventListener("open", () =>
+        void appears(cookieStore).then(() => {
+          const send = () => {
+            try {
+              ws.send(JSON.stringify(cookies()));
+            } catch {
+              // Chrome is mid-write; its next write fires again.
+            }
+          };
+          const watcher = watch(dirname(cookieStore), (_, name) => name === basename(cookieStore) && send());
+          send();
           open(ws, (pipe) => {
-            pipe.send = (message) => upstream.send(message);
-            pipe.close = () => upstream.close();
+            pipe.close = () => watcher.close();
+          });
+        });
+
+        return;
+      }
+
+      if (ws.data.kind === "cdp" && upstream !== null) {
+        controllers += 1;
+        const chrome = new WebSocket(upstream);
+        chrome.addEventListener("message", (event) => ws.send(event.data as string));
+        chrome.addEventListener("close", () => ws.close());
+        chrome.addEventListener("open", () =>
+          open(ws, (pipe) => {
+            pipe.send = (message) => chrome.send(message);
+            pipe.close = () => chrome.close();
           }),
         );
 
@@ -157,7 +240,7 @@ Bun.serve<Pipe>({
 
     close: (ws) => {
       ws.data.close?.();
-      if (ws.data.kind === "cdp" && --controllers === 0) {
+      if (ws.data.kind !== "vnc" && --controllers === 0) {
         process.exit(0);
       }
     },

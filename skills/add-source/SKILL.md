@@ -33,13 +33,13 @@ Snapshots are dated, read-only, and kept forever, so `rows` can be fixed later a
 
 ## Remote computer sources
 
-`sources/x.ts` is the model to copy. `site(provider, { name, login, signedIn })` from `src/computer.ts` gives a source its `signin` (a computer opens the login page; the person signs in on its screen, or you drive it over the printed DevTools address) and `run` (a fresh computer with the saved session, destroyed afterwards). Inside `run`:
+`sources/x.ts` is the model to copy. `site(provider, { name, login, signedIn })` from `src/computer.ts` gives a source its `signin` (a computer opens the login page with no DevTools attached, since sites refuse sign-ins from a controlled browser; the person signs in on its screen, and the session is saved from Chrome's cookie store the moment `signedIn` passes) and `run` (a fresh computer with the saved session, destroyed afterwards). Inside `run`:
 
 - Open the user's own pages and keep the JSON the site's app loads (`capture`), not what's on screen. Save each response as it came, one per line.
 - Scroll like a person (`wheel`, then a pause) and stop at a post you kept last time (keep a few IDs in `state`) or at the end.
 - Set `every` to a few days.
 
-To sign in for the user, drive the DevTools address with any CDP tool, such as `agent-browser --cdp "<address>"`. If they use enclave, type secrets without seeing them: `enclave run P="X/password" sh -c 'agent-browser --cdp "<address>" type <ref> "$P"'`. A CAPTCHA or a code sent to their phone is theirs to finish on the computer's screen.
+To sign in for the user, use the printed screen link with a computer-use tool. A CAPTCHA or a code sent to their phone is theirs to finish on the computer's screen.
 
 ## Example
 

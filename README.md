@@ -159,7 +159,7 @@ sources: [github, prompts, x()],
 commonplace signin x    # prints a link to the computer's screen: sign in there
 ```
 
-Your agent can sign in for you instead: the same command prints a Chrome DevTools address it can drive, and with [enclave](https://github.com/AVGVSTVS96/enclave) your password and 2FA code go from your password manager into the page without passing through the chat.
+Your agent can sign in for you instead, on the same screen, with any computer-use tool. The sign-in computer runs Chrome without DevTools attached, because sites turn away sign-ins from a browser under remote control. Once you're in, it saves your session and shuts down.
 
 To run computers on Fly.io instead of your own machine, make an app once and hand its name to the source:
 

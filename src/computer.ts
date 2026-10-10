@@ -9,10 +9,18 @@ export interface Box {
   readonly stop: () => Promise<void>;
 }
 
-/** Where boxes run. One box per user at a time: `start` replaces any box still running. */
+/**
+ * Where boxes run. One box per user at a time: `start` replaces any box still running.
+ * Given a `signin` page, the box opens it for a person, with no DevTools attached.
+ */
 export interface Provider {
-  readonly start: (token: string) => Promise<Box>;
+  readonly start: (token: string, signin?: string) => Promise<Box>;
 }
+
+const envOf = (token: string, signin?: string) => ({
+  BOX_TOKEN: token,
+  ...(signin === undefined ? {} : { BOX_SIGNIN: signin }),
+});
 
 const image = "commonplace-computer";
 const context = new URL("../computer", import.meta.url).pathname;
@@ -28,12 +36,13 @@ export const local = ({
   engine = Bun.which("docker") === null ? "podman" : "docker",
   address = "127.0.0.1",
 }: LocalOptions = {}): Provider => ({
-  start: async (token) => {
+  start: async (token, signin) => {
     await $`${engine} rm -f ${image}`.quiet().nothrow();
     if ((await $`${engine} image inspect ${image}`.quiet().nothrow()).exitCode !== 0) {
       await $`${engine} build -t ${image} ${context}`;
     }
-    await $`${engine} run -d --rm --init --name ${image} -p ${address}::8080 -e BOX_TOKEN=${token} ${image}`.quiet();
+    const env = Object.entries(envOf(token, signin)).flatMap(([name, value]) => ["-e", `${name}=${value}`]);
+    await $`${engine} run -d --rm --init --name ${image} -p ${address}::8080 ${env} ${image}`.quiet();
     const port = (await $`${engine} port ${image} 8080`.text()).trim().split(":").at(-1);
 
     return {
@@ -74,7 +83,7 @@ export const fly = (options: FlyOptions): Provider => {
   const destroy = (id: string) => call(`/${id}?force=true`, { method: "DELETE" }).catch(() => undefined);
 
   return {
-    start: async (token) => {
+    start: async (token, signin) => {
       for (const machine of await call<ReadonlyArray<{ id: string }>>("")) {
         await destroy(machine.id);
       }
@@ -84,7 +93,7 @@ export const fly = (options: FlyOptions): Provider => {
           ...(options.region === undefined ? {} : { region: options.region }),
           config: {
             image: options.image ?? "ghcr.io/avgvstvs96/commonplace-computer:latest",
-            env: { BOX_TOKEN: token },
+            env: envOf(token, signin),
             guest: { cpu_kind: "shared", cpus: 2, memory_mb: 2048 },
             auto_destroy: true,
             restart: { policy: "no" },
@@ -136,6 +145,10 @@ export interface Computer {
   readonly cdp: string;
   readonly send: <T = unknown>(method: string, params?: object) => Promise<T>;
   readonly on: (method: string, listener: (params: any) => void) => () => void;
+  /**
+   * Opens a page and resolves once it has loaded and its network has gone almost quiet
+   * (two or fewer requests open for half a second), so whatever the page asks for first has been asked.
+   */
   readonly goto: (url: string) => Promise<void>;
   readonly evaluate: <T>(expression: string) => Promise<T>;
   /** Every response whose URL matches, in order, from now until `stop`. */
@@ -154,11 +167,11 @@ const connect = (url: string): Promise<WebSocket> =>
     ws.addEventListener("error", () => reject(new Error(`could not connect to ${url.split("?")[0]}`)));
   });
 
-const attach = async (box: Box): Promise<{ computer: Computer; ws: WebSocket }> => {
-  const cdp = `${box.url.replace(/^http/, "ws")}/cdp?token=${box.token}`;
-  let ws: WebSocket | undefined;
-  while (ws === undefined) {
-    ws = await connect(cdp).catch(async (error: unknown) => {
+/** Connects to one of the box's sockets as soon as its gateway is up. */
+const reach = async (box: Box, path: string): Promise<WebSocket> => {
+  const url = `${box.url.replace(/^http/, "ws")}${path}?token=${box.token}`;
+  for (;;) {
+    const ws = await connect(url).catch(async (error: unknown) => {
       if (!(await box.alive())) {
         throw error;
       }
@@ -166,8 +179,17 @@ const attach = async (box: Box): Promise<{ computer: Computer; ws: WebSocket }> 
 
       return undefined;
     });
+    if (ws !== undefined) {
+      return ws;
+    }
   }
-  const socket = ws;
+};
+
+const viewOf = (box: Box) =>
+  `${box.url}/vnc.html?autoconnect=1&resize=scale&path=${encodeURIComponent(`websockify?token=${box.token}`)}`;
+
+const attach = async (box: Box): Promise<{ computer: Computer; ws: WebSocket }> => {
+  const socket = await reach(box, "/cdp");
   const pending = new Map<number, { resolve: (value: any) => void; reject: (error: Error) => void }>();
   const listeners = new Map<string, Set<(params: any) => void>>();
   let sessionId: string | undefined;
@@ -223,6 +245,7 @@ const attach = async (box: Box): Promise<{ computer: Computer; ws: WebSocket }> 
     flatten: true,
   }));
   await raw("Page.enable");
+  await raw("Page.setLifecycleEventsEnabled", { enabled: true });
   await raw("Network.enable");
   await raw("Runtime.enable");
 
@@ -254,19 +277,28 @@ const attach = async (box: Box): Promise<{ computer: Computer; ws: WebSocket }> 
   };
 
   const computer: Computer = {
-    view: `${box.url}/vnc.html?autoconnect=1&resize=scale&path=${encodeURIComponent(`websockify?token=${box.token}`)}`,
-    cdp,
+    view: viewOf(box),
+    cdp: socket.url,
     send: raw,
     on,
     goto: async (url) => {
-      const loaded = new Promise<void>((resolve) => {
-        const off = on("Page.loadEventFired", () => {
-          off();
-          resolve();
-        });
+      const quiet = new Set<string>();
+      const waiting = new Map<string, () => void>();
+      const off = on("Page.lifecycleEvent", ({ name, loaderId }) => {
+        if (name === "networkAlmostIdle") {
+          quiet.add(loaderId);
+          waiting.get(loaderId)?.();
+        }
       });
-      await raw("Page.navigate", { url });
-      await loaded;
+      const { loaderId } = await raw<{ loaderId: string }>("Page.navigate", { url });
+      await new Promise<void>((resolve) => {
+        if (quiet.has(loaderId)) {
+          resolve();
+        } else {
+          waiting.set(loaderId, resolve);
+        }
+      });
+      off();
     },
     evaluate: async <T>(expression: string) => {
       const { result, exceptionDetails } = await raw<{ result: { value: T }; exceptionDetails?: unknown }>(
@@ -299,23 +331,28 @@ const attach = async (box: Box): Promise<{ computer: Computer; ws: WebSocket }> 
 };
 
 /** Starts a box, runs `work` on it, and destroys it however `work` ends. */
-export const withComputer = async <T>(
-  provider: Provider,
-  work: (computer: Computer) => Promise<T>,
-): Promise<T> => {
-  const token = Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString("base64url");
-  const box = await provider.start(token);
+const withBox = async <T>(provider: Provider, signin: string | undefined, work: (box: Box) => Promise<T>) => {
+  const box = await provider.start(
+    Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString("base64url"),
+    signin,
+  );
   try {
+    return await work(box);
+  } finally {
+    await box.stop();
+  }
+};
+
+/** Starts a box, runs `work` on its Chrome over DevTools, and destroys it however `work` ends. */
+export const withComputer = <T>(provider: Provider, work: (computer: Computer) => Promise<T>): Promise<T> =>
+  withBox(provider, undefined, async (box) => {
     const { computer, ws } = await attach(box);
     try {
       return await work(computer);
     } finally {
       ws.close();
     }
-  } finally {
-    await box.stop();
-  }
-};
+  });
 
 /** The signed-in browser session for one site, kept in the source's private state directory. */
 export const session = (state: string) => {
@@ -340,24 +377,20 @@ export interface Site {
 /** Sign-in and signed-in runs for one website, on boxes from `provider`. */
 export const site = (provider: Provider, { name, login, signedIn }: Site) => ({
   signin: ({ state }: { readonly state: string }) =>
-    withComputer(provider, async (computer) => {
-      const cookieSet = new Promise<void>((resolve) => {
-        const off = computer.on("Network.responseReceivedExtraInfo", ({ headers }) => {
-          if (Object.keys(headers).some((header) => header.toLowerCase() === "set-cookie")) {
-            void computer.cookies().then((cookies) => {
-              if (signedIn(cookies)) {
-                off();
-                resolve();
-              }
-            });
+    withBox(provider, login, async (box) => {
+      const ws = await reach(box, "/cookies");
+      console.log(`Sign in to ${name} on the remote computer's screen:\n  ${viewOf(box)}`);
+      const cookies = await new Promise<ReadonlyArray<Cookie>>((resolve, reject) => {
+        ws.addEventListener("message", (message) => {
+          const saved = JSON.parse(String(message.data)) as ReadonlyArray<Cookie>;
+          if (signedIn(saved)) {
+            resolve(saved);
           }
         });
+        ws.addEventListener("close", () => reject(new Error("the box closed before you signed in")));
       });
-      await computer.goto(login);
-      console.log(`Sign in to ${name} on the remote computer's screen:\n  ${computer.view}`);
-      console.log(`Agents can drive it over Chrome DevTools at:\n  ${computer.cdp}`);
-      await cookieSet;
-      session(state).save(await computer.cookies());
+      ws.close();
+      session(state).save(cookies);
       console.log(`Signed in to ${name}.`);
     }),
 
