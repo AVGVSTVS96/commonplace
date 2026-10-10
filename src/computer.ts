@@ -48,8 +48,8 @@ export const local = ({
 export interface FlyOptions {
   /** A Fly app of your own with a shared IPv4 and an IPv6, made once with `fly apps create`. */
   readonly app: string;
-  /** Any registry path Fly can pull. */
-  readonly image: string;
+  /** Any registry path Fly can pull. Defaults to the image built from `computer/` in commonplace's repo. */
+  readonly image?: string;
   readonly region?: string;
   readonly token?: string;
 }
@@ -83,7 +83,7 @@ export const fly = (options: FlyOptions): Provider => {
         body: JSON.stringify({
           ...(options.region === undefined ? {} : { region: options.region }),
           config: {
-            image: options.image,
+            image: options.image ?? "ghcr.io/avgvstvs96/commonplace-computer:latest",
             env: { BOX_TOKEN: token },
             guest: { cpu_kind: "shared", cpus: 2, memory_mb: 2048 },
             auto_destroy: true,

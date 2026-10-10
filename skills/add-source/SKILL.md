@@ -16,6 +16,8 @@ Snapshots are dated, read-only, and kept forever, so `rows` can be fixed later a
 
 1. **Find the data.** Ask the user only what you can't discover: which account, which export. Prefer, in order: an official CLI or API the user is already signed into, a local database or file the app keeps, a data export they download by hand. For a one-time export, skip `fetch`: copy the export into `data/raw/<name>/<YYYY-MM-DD>/` and write only `rows`.
 
+   For a site with no usable API or automatable export (X, Instagram, LinkedIn), use a remote computer: see "Remote computer sources" below.
+
 2. **Write `fetch`.** Save the service's own output as close to raw as you can (JSON, JSONL, CSV) under `dir`. Don't reshape it; `rows` does that. Use `since` (the last snapshot's date, or null) to take only what's new when the full history is large. Overlapping a day is free: rows with the same ID merge. Throw on failure; the partial snapshot is discarded and retried on the next sync.
 
 3. **Write `rows`.** Read with `json`, `jsonl`, or `lines` from `src/source.ts`; build rows with `thing`, `event`, `link`, `iso`, `urlId` from `src/schema.ts`.
@@ -28,6 +30,16 @@ Snapshots are dated, read-only, and kept forever, so `rows` can be fixed later a
 4. **Register it** in `commonplace.config.ts`: add it to `sources` (earlier sources win when two disagree on a field), and add its name to `mcp` only if the user wants MCP clients to read it. Ask before exposing anything personal like messages, mail, or health data. Suggest `redact` rules for anything they'd rather keep out entirely.
 
 5. **Run it**: `commonplace sync`, then read the coverage report. A failed snapshot names the file and row. Check a few records with `commonplace search` and `commonplace show <id>`, then `bun run check`.
+
+## Remote computer sources
+
+`sources/x.ts` is the model to copy. `site(provider, { name, login, signedIn })` from `src/computer.ts` gives a source its `signin` (a computer opens the login page; the person signs in on its screen, or you drive it over the printed DevTools address) and `run` (a fresh computer with the saved session, destroyed afterwards). Inside `run`:
+
+- Open the user's own pages and keep the JSON the site's app loads (`capture`), not what's on screen. Save each response as it came, one per line.
+- Scroll like a person (`wheel`, then a pause) and stop at a post you kept last time (keep a few IDs in `state`) or at the end.
+- Set `every` to a few days.
+
+To sign in for the user, drive the DevTools address with any CDP tool, such as `agent-browser --cdp "<address>"`. If they use enclave, type secrets without seeing them: `enclave run P="X/password" sh -c 'agent-browser --cdp "<address>" type <ref> "$P"'`. A CAPTCHA or a code sent to their phone is theirs to finish on the computer's screen.
 
 ## Example
 

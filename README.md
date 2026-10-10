@@ -40,15 +40,15 @@ It's a template you own, not an app you install: about a thousand lines of TypeS
 | `github`   | your pull requests, issues and stars              | `gh` signed in                            |
 | `prompts`  | every prompt you typed into Claude Code and Codex | nothing, read from disk                   |
 | `imessage` | every iMessage and SMS conversation               | macOS, Full Disk Access for your terminal |
+| `x`        | your bookmarks, likes, posts and replies          | a [remote computer](#remote-computers)    |
 
 ### Coming built in
 
-| source         | what                                               | needs                                       |
-| -------------- | -------------------------------------------------- | ------------------------------------------- |
-| X archive      | your posts, likes, DMs and Grok chats, all of them | the archive you download from X's settings  |
-| X              | new posts, likes and bookmarks every day           | an X developer app (pay per use, cents/day) |
-| Google Takeout | searches, YouTube, Maps, Chrome, Calendar          | a Takeout export                            |
-| Raindrop       | bookmarks and collections                          | a CSV export or API token                   |
+| source         | what                                               | needs                                      |
+| -------------- | -------------------------------------------------- | ------------------------------------------ |
+| X archive      | your posts, likes, DMs and Grok chats, all of them | the archive you download from X's settings |
+| Google Takeout | searches, YouTube, Maps, Chrome, Calendar          | a Takeout export                           |
+| Raindrop       | bookmarks and collections                          | a CSV export or API token                  |
 
 ### One ask away
 
@@ -132,6 +132,50 @@ export default defineConfig({
 ```
 
 Some sources take options. `imessage({ drop: (message, chat) => … })` keeps matching messages out of the snapshot itself, so they never exist anywhere but Messages.
+
+## Remote computers
+
+Some of what matters most has no API you'd set up and no export you can automate: X, Instagram, LinkedIn, TikTok. For those, commonplace starts a remote computer, a fresh Chrome on a screen of its own, signed in to your account. It opens your own pages the way you would, keeps the data the site's app loads for you, and writes it into your snapshot. Then the computer is destroyed.
+
+```
+commonplace sync ── x is due ──▶ start a computer ──▶ your session in, your pages opened
+     ▲                                                     │
+data/raw/x/<date>/ ◀── the site's own JSON ◀───────────────┘  computer destroyed
+```
+
+- **Your session stays with you.** It lives in `data/state/<source>/`, goes into each computer over an encrypted connection after it starts, and comes back out when the run ends. The computer keeps nothing, and nothing is stored anywhere else.
+- **One computer, at your pace.** Only one runs at a time, it scrolls like a person, and a source catches up every few days rather than all day.
+- **Runs wherever you like.** The computer is a plain container image in [`computer/`](computer/), so it runs in Docker or Podman on your own machine (the default), on [Fly.io](https://fly.io), or anywhere else that runs containers.
+
+Add the source and sign in once:
+
+```ts
+import { x } from "./sources/x.ts";
+
+sources: [github, prompts, x()],
+```
+
+```sh
+commonplace signin x    # prints a link to the computer's screen: sign in there
+```
+
+Your agent can sign in for you instead: the same command prints a Chrome DevTools address it can drive, and with [enclave](https://github.com/AVGVSTVS96/enclave) your password and 2FA code go from your password manager into the page without passing through the chat.
+
+To run computers on Fly.io instead of your own machine, make an app once and hand its name to the source:
+
+```sh
+fly apps create my-commonplace
+fly ips allocate-v4 --shared -a my-commonplace && fly ips allocate-v6 -a my-commonplace
+export FLY_API_TOKEN=$(fly tokens create deploy -a my-commonplace)
+```
+
+```ts
+import { fly } from "./src/computer.ts";
+
+x({ computer: fly({ app: "my-commonplace", region: "sjc" }) }),
+```
+
+Pick the region nearest you. A run takes a few minutes on a shared 2 CPU machine, which costs well under a cent.
 
 ## How it works
 

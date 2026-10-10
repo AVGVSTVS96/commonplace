@@ -8,7 +8,7 @@ const token = process.env["BOX_TOKEN"] ?? "";
 const display = ":1";
 const vncPort = 5901;
 const profile = `${process.env["HOME"]}/profile`;
-const novnc = "/usr/share/novnc";
+const novnc = "/opt/novnc";
 
 if (token.length < 32) {
   throw new Error("BOX_TOKEN must be at least 32 characters");
