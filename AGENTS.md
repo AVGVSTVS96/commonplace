@@ -27,3 +27,4 @@ commonplace.config.ts   which sources, their rank, MCP exposure, redaction
 - `data/` is the user's private data. Never commit it, and never edit or delete anything in `data/raw/`.
 - Agents read the archive only through the CLI or MCP, never the database file.
 - To add a source, follow `skills/add-source/SKILL.md`.
+- Public copy, examples and defaults are written for anyone who copies the template, not from the maintainer's own setup: every browser, every mail provider, live services only.

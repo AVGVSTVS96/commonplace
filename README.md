@@ -54,11 +54,11 @@ It's a template you own, not an app you install: about a thousand lines of TypeS
 
 Anything with an export, a local database, an API or a CLI. Ask your agent, _"add my Obsidian vault to commonplace"_, and the [`add-source`](skills/add-source/SKILL.md) skill has it write the source: one file, usually under 80 lines. It works for any agent that reads files, not just Claude Code.
 
-- **Browsing:** Chrome, Safari, Arc or Dia history
+- **Browsing:** Chrome, Safari, Firefox, Edge, Arc or any other browser's history
 - **Notes:** Obsidian or any folder of markdown, Apple Notes
 - **Mail and calendar:** Gmail via Takeout, any `.ics`
 - **Chat:** Slack, Discord and Telegram exports
-- **Reading and media:** Readwise, Pocket, Goodreads, Letterboxd, Spotify, Reddit exports
+- **Reading and media:** Readwise, Goodreads, Letterboxd, Spotify, Reddit exports
 
 ## Start
 
@@ -93,7 +93,7 @@ codex mcp add commonplace -- commonplace mcp
 command: commonplace   args: ["mcp"]
 ```
 
-Then ask something only your history can answer: _"What was I working on the week I first used Effect?"_, _"Which repos have I starred about syntax highlighting?"_, _"Have I already tried a streaming markdown renderer?"_
+Then ask something only your history can answer: _"What was that restaurant someone texted me about last spring?"_, _"What was I working on the week before my last trip?"_, _"Have I asked an agent about this before?"_
 
 ## Use
 
