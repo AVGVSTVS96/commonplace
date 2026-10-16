@@ -117,10 +117,14 @@ export const open = (file: string, sources: ReadonlyArray<string>) => {
     },
     { allowed: string }
   >(`
-    SELECT source, count(*) AS snapshots, max(date) AS latest, sum(things) AS things, sum(events) AS events,
-      sum(error IS NOT NULL) AS failed
-    FROM snapshots WHERE source IN (SELECT value FROM json_each($allowed))
-    GROUP BY source ORDER BY source
+    SELECT s.source, s.snapshots, s.latest, coalesce(t.n, 0) AS things, coalesce(e.n, 0) AS events, s.failed
+    FROM (
+      SELECT source, count(*) AS snapshots, max(date) AS latest, sum(error IS NOT NULL) AS failed FROM snapshots
+      WHERE source IN (SELECT value FROM json_each($allowed)) GROUP BY source
+    ) s
+    LEFT JOIN (SELECT j.value AS source, count(*) AS n FROM things, json_each(things.sources) j GROUP BY 1) t USING (source)
+    LEFT JOIN (SELECT j.value AS source, count(*) AS n FROM events, json_each(events.sources) j GROUP BY 1) e USING (source)
+    ORDER BY s.source
   `);
   const verbsQuery = db.query<{ verb: string; n: number }, { allowed: string }>(
     `SELECT verb, count(*) AS n FROM events e WHERE ${visible("e.sources")} GROUP BY verb ORDER BY n DESC`,

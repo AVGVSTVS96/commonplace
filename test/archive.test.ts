@@ -132,7 +132,9 @@ test("a reader sees only rows whose every source it may read", async () => {
   expect(store.show(page)).toBeNull();
   expect(store.search("diary").map((hit) => hit.id)).toEqual(["note:1"]);
   expect(store.show("note:1")).toMatchObject({ links: [] });
-  expect(store.stats().sources.map((s) => s.source)).toEqual(["notes"]);
+  expect(store.stats().sources).toEqual([
+    { source: "notes", snapshots: 3, latest: "2026-01-21", things: 2, events: 2, failed: 1 },
+  ]);
 });
 
 test("search matches word forms, and a link to a thing no source defined still shows", async () => {
