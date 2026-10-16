@@ -42,7 +42,6 @@ const fixture = () => {
 
 const config = defineConfig({
   sources: [fromFile("bookmarks"), fromFile("notes")],
-  mcp: ["bookmarks"],
 });
 
 test("urlRef drops www, tracking, fragments, and trailing slashes", () => {
@@ -80,7 +79,7 @@ test("urlRef names posts, videos, repos and pull requests the same from any link
 test("the strongest source wins each field, its newest snapshot first, and nulls never erase", async () => {
   const data = fixture();
   const built = await build(config, data);
-  const store = open(paths(data).db, ["bookmarks", "notes"]);
+  const store = open(paths(data).db);
   const shown = store.show(page);
 
   expect(shown?.thing).toMatchObject({
@@ -95,7 +94,7 @@ test("the strongest source wins each field, its newest snapshot first, and nulls
 test("once-verbs merge across sources and keep every collection", async () => {
   const data = fixture();
   await build(config, data);
-  const shown = open(paths(data).db, ["bookmarks", "notes"]).show(`saved:${page}`);
+  const shown = open(paths(data).db).show(`saved:${page}`);
 
   expect(shown).toMatchObject({
     event: {
@@ -117,31 +116,18 @@ test("a bad row fails its whole snapshot and the build says where", async () => 
 test("redacted rows never reach the database, and their events go with them", async () => {
   const data = fixture();
   await build({ ...config, redact: (row) => row.type === "thing" && row.id === "note:1" }, data);
-  const store = open(paths(data).db, ["bookmarks", "notes"]);
+  const store = open(paths(data).db);
 
   expect(store.show("note:1")).toBeNull();
   expect(store.search("diary")).toEqual([]);
   expect(store.timeline({ verb: "posted" })).toEqual([]);
 });
 
-test("a reader sees only rows whose every source it may read", async () => {
-  const data = fixture();
-  await build(config, data);
-  const store = open(paths(data).db, ["notes"]);
-
-  expect(store.show(page)).toBeNull();
-  expect(store.search("diary").map((hit) => hit.id)).toEqual(["note:1"]);
-  expect(store.show("note:1")).toMatchObject({ links: [] });
-  expect(store.stats().sources).toEqual([
-    { source: "notes", snapshots: 3, latest: "2026-01-21", things: 2, events: 2, failed: 1 },
-  ]);
-});
-
 test("timeline compares times as instants, whatever offset they're written in", async () => {
   const data = fixture();
   await build(config, data);
   const posted = (since: string) =>
-    open(paths(data).db, ["notes"])
+    open(paths(data).db)
       .timeline({ verb: "posted", since })
       .map((hit) => hit.id);
 
@@ -157,7 +143,7 @@ test("search matches word forms, and a link to a thing no source defined still s
     link("note:2", "replies_to", "note:elsewhere"),
   ]);
   await build(config, data);
-  const store = open(paths(data).db, ["notes"]);
+  const store = open(paths(data).db);
 
   expect(store.search("trip").map((hit) => hit.id)).toEqual(["note:2"]);
   expect(store.show("note:2")).toMatchObject({
@@ -170,7 +156,7 @@ test("search falls back to plain words when the query isn't FTS5 syntax", async 
   await build(config, data);
 
   expect(
-    open(paths(data).db, ["notes"])
+    open(paths(data).db)
       .search("private (diary")
       .map((hit) => hit.id),
   ).toEqual(["note:1"]);
@@ -195,7 +181,7 @@ test("sync snapshots each source once a day, read-only, and leaves nothing behin
     },
     rows: () => [],
   });
-  const both = defineConfig({ sources: [notes, broken], mcp: [] });
+  const both = defineConfig({ sources: [notes, broken] });
 
   const first = await sync(both, data, () => {});
   const second = await sync(both, data, () => {});
@@ -213,7 +199,7 @@ test("sync snapshots each source once a day, read-only, and leaves nothing behin
 
 test("sync rebuilds when a snapshot is dropped in by hand, and only then", async () => {
   const data = mkdtempSync(`${tmpdir()}/commonplace-`);
-  const only = defineConfig({ sources: [fromFile("export")], mcp: [] });
+  const only = defineConfig({ sources: [fromFile("export")] });
 
   snapshot(data, "export", "2026-01-01", [thing({ id: "note:1", kind: "note" })]);
   expect((await sync(only, data, () => {}))?.built?.things).toBe(1);
@@ -237,7 +223,7 @@ test("a source with `every` waits that many days, and gets its own state directo
     },
     rows: () => [],
   });
-  const only = defineConfig({ sources: [weekly], mcp: [] });
+  const only = defineConfig({ sources: [weekly] });
 
   snapshot(data, "weekly", daysAgo(6), []);
   expect((await sync(only, data, () => {}))?.fetched).toEqual([]);

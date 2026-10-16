@@ -16,7 +16,5 @@ export default defineConfig({
     ...(process.platform === "darwin" ? [imessage()] : []),
   ],
 
-  mcp: ["github", "prompts", "raindrop"],
-
   redact: (row) => row.type === "event" && /\b(password|api[_ -]?key|secret)\b/i.test(row.text ?? ""),
 });

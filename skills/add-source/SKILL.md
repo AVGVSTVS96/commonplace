@@ -27,7 +27,7 @@ Check `sources/` first. X is built in, with no API key. When the user wants it, 
    - An event's thing must come from some source, or the event is dropped. A link may point at a thing no source defines.
    - Folder, list and tag names go in the event's `collections`.
    - A local file that changes when there's something new (an app's database) goes in `watch`; then rerun `commonplace install`.
-4. **Register it**: add it to `sources` in `commonplace.config.ts`, where earlier sources win a field when two disagree. Add it to `mcp` only if the user wants MCP clients to read it, and ask first for messages, mail, health and the like. Suggest `redact` rules for anything they'd keep out.
+4. **Register it**: add it to `sources` in `commonplace.config.ts`, where earlier sources win a field when two disagree. Every agent can read what's archived, so ask first for messages, mail, health and the like, and suggest `redact` rules for anything they'd keep out.
 5. **Run it**: `commonplace sync`, and read the report; a failed snapshot names its file and row. Spot-check with `commonplace search` and `commonplace show <id>`, then run `bun run check`.
 
 ## Sites without an API

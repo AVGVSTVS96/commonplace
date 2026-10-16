@@ -21,7 +21,7 @@ const usage = `commonplace: your personal data kit for agents
   commonplace sync               snapshot every source due today, then rebuild if anything is new
   commonplace install            sync on its own: at login, on new messages, when a hook kicks it (macOS)
   commonplace build              rebuild the database from data/raw
-  commonplace mcp                MCP server on stdio  --sources a,b to narrow what a client sees
+  commonplace mcp                MCP server on stdio
   commonplace sql <query>        read-only SQL, local only
   commonplace root               where this commonplace lives
 
@@ -31,7 +31,6 @@ const usage = `commonplace: your personal data kit for agents
 const root = dirname(import.meta.dir);
 const data = process.env["COMMONPLACE_DATA"] ?? `${root}/data`;
 const { db } = paths(data);
-const everything = config.sources.map(({ name }) => name);
 
 const { values, positionals } = parseArgs({
   allowPositionals: true,
@@ -41,7 +40,6 @@ const { values, positionals } = parseArgs({
     since: { type: "string" },
     until: { type: "string" },
     verb: { type: "string" },
-    sources: { type: "string" },
     help: { type: "boolean", short: "h" },
   },
 });
@@ -56,7 +54,7 @@ const fail = (message: string): never => {
 
 const archive = (): string => (existsSync(db) ? db : fail("No archive yet. Run `commonplace sync` first."));
 
-const store = (sources: ReadonlyArray<string>) => open(archive(), sources);
+const store = () => open(archive());
 
 const lines = (hits: ReadonlyArray<Hit>): string =>
   hits
@@ -73,22 +71,22 @@ const print = (value: unknown, text: () => string) =>
 
 switch (values.help === true ? "help" : (command ?? "help")) {
   case "search": {
-    const hits = store(everything).search(rest.join(" "), limit);
+    const hits = store().search(rest.join(" "), limit);
     print(hits, () => lines(hits));
     break;
   }
   case "timeline": {
-    const hits = store(everything).timeline({ ...values, limit });
+    const hits = store().timeline({ ...values, limit });
     print(hits, () => lines(hits));
     break;
   }
   case "show": {
-    const record = store(everything).show(rest[0] ?? fail("Usage: commonplace show <id>"));
+    const record = store().show(rest[0] ?? fail("Usage: commonplace show <id>"));
     console.log(JSON.stringify(record ?? fail(`No record with id ${rest[0]}`), null, 1));
     break;
   }
   case "stats": {
-    const stats = store(everything).stats();
+    const stats = store().stats();
     print(stats, () =>
       [
         ...stats.sources.map(
@@ -128,15 +126,13 @@ switch (values.help === true ? "help" : (command ?? "help")) {
     console.log(await install(config, root, data));
     break;
   case "mcp": {
-    const sources = values.sources?.split(",").map((s) => s.trim()) ?? config.mcp;
-    const allowed = sources.filter((s) => config.mcp.includes(s));
-    let current = { store: store(allowed), at: statSync(db).mtimeMs };
+    let current = { store: store(), at: statSync(db).mtimeMs };
     // A sync renames a new database over the old one, so a long-lived server reopens it.
     await serve(() => {
       const at = statSync(db).mtimeMs;
       if (at !== current.at) {
         current.store.close();
-        current = { store: store(allowed), at };
+        current = { store: store(), at };
       }
       return current.store;
     }, pkg.version);

@@ -20,7 +20,7 @@ src/sync.ts             today's snapshots, then a build if anything is new
 src/install.ts          the macOS LaunchAgent, and the fixed binary (src/launcher.ts) it runs
 src/cli.ts, src/mcp.ts  the two doors, both through store.ts
 sources/<name>.ts       one file per source: fetch and rows
-commonplace.config.ts   which sources, their rank, MCP exposure, redaction
+commonplace.config.ts   which sources, their rank, redaction
 ```
 
 ## Rules

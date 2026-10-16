@@ -26,7 +26,7 @@ commonplace      CLI ── search · timeline · show · stats
 
 It's a template you own, not an app you install: about 1,300 lines of TypeScript plus one file per source, no runtime dependencies (Bun and its built-in SQLite), in your own repo next to your own data. Read it in an afternoon. Change anything.
 
-- **You choose what agents see over MCP.** Your data lives in `data/`, never in git. Agents never open the database: the MCP server shows only the sources you list, and `redact` rules keep rows out of the archive entirely. The CLI shows every source to whoever runs it.
+- **You choose what goes in.** Your data lives in `data/`, never in git. Agents read it through the CLI or MCP, never the database file, and see everything in it, so what they shouldn't see stays out: leave the source off, or keep rows out with `redact` and a source's own `drop`.
 - **It keeps itself current.** `commonplace sync` takes one snapshot per source per day and rebuilds. On a Mac, `commonplace install` runs it at login, whenever a message arrives, and whenever an agent session ends.
 - **One shape for everything.** Every source becomes things, events and links, with IDs derived from content, so the same page saved in two apps is one record.
 - **Agents write the sources.** The `add-source` skill has your agent write one for any app or export you have.
@@ -132,7 +132,7 @@ commonplace stats              sources, freshness, kinds, verbs
 commonplace sync               snapshot every source due today, then rebuild if anything is new
 commonplace install            sync on its own: at login, on new messages, when a hook kicks it (macOS)
 commonplace build              rebuild the database from data/raw
-commonplace mcp                MCP server on stdio  --sources a,b to narrow what a client sees
+commonplace mcp                MCP server on stdio
 commonplace sql <query>        read-only SQL, local only
 commonplace root               where this commonplace lives
 ```
@@ -149,10 +149,6 @@ The MCP server has four tools, `search`, `timeline`, `show` and `stats`, over th
 export default defineConfig({
   // strongest first: when two sources disagree on a field, the earlier one wins
   sources: [github(), prompts(), imessage()],
-
-  // what MCP clients may read; `commonplace mcp --sources github` narrows it per client
-  // messages stay local until you add "imessage" here
-  mcp: ["github", "prompts"],
 
   // rows that never reach the archive
   redact: (row) => row.type === "event" && /\b(password|api[_ -]?key|secret)\b/i.test(row.text ?? ""),
