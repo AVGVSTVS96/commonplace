@@ -5,7 +5,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "command -v commonplace >/dev/null && (nohup commonplace sync >/dev/null 2>&1 &) || true"
+            "command": "launchctl kickstart gui/$(id -u)/dev.commonplace.sync >/dev/null 2>&1 || (command -v commonplace >/dev/null && (nohup commonplace sync >/dev/null 2>&1 &)) || true"
           }
         ]
       }

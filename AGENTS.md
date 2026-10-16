@@ -12,11 +12,12 @@ bun run fix     # autofix lint and format
 ## Where things go
 
 ```
-src/schema.ts           things, events, links; verbs; thing() event() link() iso() urlId()
-src/source.ts           defineSource, Snapshot, read helpers (json, jsonl, lines)
+src/schema.ts           things, events, links; verbs; thing() event() link() iso() urlRef() digest()
+src/source.ts           defineSource, Snapshot, read helpers (json, jsonl, lines, csv)
 src/build.ts            replays every snapshot into the database; the only writer
 src/store.ts            every read query, filtered by which sources the reader may see
 src/sync.ts             daily snapshots on demand, then the build
+src/install.ts          macOS LaunchAgent that runs sync on real events
 src/mcp.ts, src/cli.ts  the two doors; both go through store.ts
 sources/<name>.ts       one file per source: fetch + rows
 commonplace.config.ts   which sources, their rank, MCP exposure, redaction

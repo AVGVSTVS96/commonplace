@@ -6,6 +6,7 @@ import { parseArgs } from "node:util";
 import config from "../commonplace.config.ts";
 import pkg from "../package.json";
 import { build, paths, report } from "./build.ts";
+import { install } from "./install.ts";
 import { serve } from "./mcp.ts";
 import { type Hit, open } from "./store.ts";
 import { stateOf, sync } from "./sync.ts";
@@ -17,6 +18,7 @@ const usage = `commonplace: your personal data kit for agents
   commonplace show <id>          one record with its events and links
   commonplace stats              sources, freshness, kinds, verbs
   commonplace sync               snapshot every source due today, then rebuild
+  commonplace install            sync on its own: at login, on new messages, when a hook kicks it (macOS)
   commonplace build              rebuild the database from data/raw
   commonplace signin <source>    sign a source in to its account
   commonplace mcp                MCP server on stdio  --sources a,b to narrow what a client sees
@@ -99,7 +101,7 @@ switch (values.help === true ? "help" : (command ?? "help")) {
     break;
   }
   case "sync": {
-    const synced = await sync(config, data, (line) => console.error(line));
+    const synced = await sync(config, data, (line) => console.error(`${new Date().toISOString()} ${line}`));
     if (synced === null) {
       console.error("Another sync is running.");
       break;
@@ -121,6 +123,9 @@ switch (values.help === true ? "help" : (command ?? "help")) {
     process.exitCode = built.outcomes.some((o) => o.error !== null) ? 1 : 0;
     break;
   }
+  case "install":
+    console.log(await install(config, root, data));
+    break;
   case "signin": {
     const signs = config.sources.filter((s) => s.signin !== undefined);
     const source =

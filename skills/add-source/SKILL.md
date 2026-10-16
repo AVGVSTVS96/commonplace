@@ -24,12 +24,13 @@ Check `sources/` before writing one. X (bookmarks, likes, posts, replies) ships 
 
 2. **Write `fetch`.** Save the service's own output as close to raw as you can (JSON, JSONL, CSV) under `dir`. Don't reshape it; `rows` does that. Use `since` (the last snapshot's date, or null) to take only what's new when the full history is large. Overlapping a day is free: rows with the same ID merge. Throw on failure; the partial snapshot is discarded and retried on the next sync.
 
-3. **Write `rows`.** Read with `json`, `jsonl`, or `lines` from `src/source.ts`; build rows with `thing`, `event`, `link`, `iso`, `urlId` from `src/schema.ts`.
-   - **IDs come from content**, so every source names the same thing the same way: `url:<host/path>` via `urlId()` for any web page, `gh:repo:owner/name`, `<service>:<kind>:<native id>`. Never a row number or a random ID.
+3. **Write `rows`.** Read with `json`, `jsonl`, `lines` or `csv` from `src/source.ts`; build rows with `thing`, `event`, `link`, `iso`, `urlRef` from `src/schema.ts`.
+   - **IDs come from content**, so every source names the same thing the same way: `urlRef()` for any link (a post, video, repo or pull request when it is one, else `url:<host/path>`), `gh:repo:owner/name`, `<service>:<kind>:<native id>`. Never a row number or a random ID. A repeatable event with no ID of its own gets `key: digest(...its fields)`.
    - **Verbs say what the user did**, not what the app calls it. Use one from `src/schema.ts` (`saved`, `liked`, `posted`, `opened`, `followed`, `sent`, `received`, `prompted`, `commented`, `visited`, …). Add a verb there only when none fits.
    - **Times are real or null.** `iso()` the source's own timestamp; never use the fetch time or guess.
-   - Every event's thing must be emitted by some source, or the build drops the event.
+   - Every event's thing must be emitted by some source, or the build drops the event. A link may point at a thing nobody defined, like the post a reply answers.
    - Put the app's folder, list, or tag names in the event's `collections`.
+   - If a local file changes whenever there's something new (an app's database), list it in `watch` so the LaunchAgent syncs on it.
 
 4. **Register it** in `commonplace.config.ts`: add it to `sources` (earlier sources win when two disagree on a field), and add its name to `mcp` only if the user wants MCP clients to read it. Ask before exposing anything personal like messages, mail, or health data. Suggest `redact` rules for anything they'd rather keep out entirely.
 
@@ -48,7 +49,7 @@ To sign in for the user, use the printed screen link with a computer-use tool. A
 ## Example
 
 ```ts
-import { event, iso, thing, urlId } from "../src/schema.ts";
+import { event, iso, thing, urlRef } from "../src/schema.ts";
 import { defineSource, json } from "../src/source.ts";
 
 interface Bookmark {
@@ -70,10 +71,17 @@ export default defineSource({
 
   rows: async function* ({ dir }) {
     for (const bookmark of await json<ReadonlyArray<Bookmark>>(`${dir}/bookmarks.json`)) {
-      const id = urlId(bookmark.link);
+      const ref = urlRef(bookmark.link);
 
-      yield thing({ id, kind: "url", title: bookmark.title, url: bookmark.link });
-      yield event({ verb: "saved", thing: id, ts: iso(bookmark.created), collections: [bookmark.folder] });
+      if (ref !== null) {
+        yield thing({ ...ref, title: bookmark.title, url: bookmark.link });
+        yield event({
+          verb: "saved",
+          thing: ref.id,
+          ts: iso(bookmark.created),
+          collections: [bookmark.folder],
+        });
+      }
     }
   },
 });
