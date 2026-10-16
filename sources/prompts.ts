@@ -161,7 +161,7 @@ async function* claude(since: string | null): AsyncGenerator<Prompt> {
   }
 }
 
-/** Codex: your turns in every session except the subagent threads Codex starts for itself. */
+/** Codex: your turns in every session except `codex exec` scripts and the subagent threads Codex starts for itself. */
 async function* codex(since: string | null): AsyncGenerator<Prompt> {
   const home = process.env["CODEX_HOME"] ?? `${homedir()}/.codex`;
   const files = [
@@ -174,7 +174,11 @@ async function* codex(since: string | null): AsyncGenerator<Prompt> {
     const meta = entries.find((e) => e?.["type"] === "session_meta")?.["payload"];
     const origin = meta?.source ?? meta?.thread_source;
 
-    if (meta === undefined || (typeof origin === "object" && origin !== null && "subagent" in origin)) {
+    if (
+      meta === undefined ||
+      origin === "exec" ||
+      (typeof origin === "object" && origin !== null && "subagent" in origin)
+    ) {
       continue;
     }
 

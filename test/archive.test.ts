@@ -137,6 +137,19 @@ test("a reader sees only rows whose every source it may read", async () => {
   ]);
 });
 
+test("timeline compares times as instants, whatever offset they're written in", async () => {
+  const data = fixture();
+  await build(config, data);
+  const posted = (since: string) =>
+    open(paths(data).db, ["notes"])
+      .timeline({ verb: "posted", since })
+      .map((hit) => hit.id);
+
+  expect(posted("2026-01-16T05:00:00-05:00")).toHaveLength(1);
+  expect(posted("2026-01-16T06:00:00-05:00")).toEqual([]);
+  expect(posted("2026-01-16")).toHaveLength(1);
+});
+
 test("search matches word forms, and a link to a thing no source defined still shows", async () => {
   const data = fixture();
   snapshot(data, "notes", "2026-01-22", [
@@ -196,6 +209,18 @@ test("sync snapshots each source once a day, read-only, and leaves nothing behin
   expect(calls).toBe(1);
   expect(statSync(`${paths(data).raw}/notes/${date}/rows.jsonl`).mode & 0o222).toBe(0);
   expect(readdirSync(`${paths(data).raw}/broken`)).toEqual([]);
+});
+
+test("sync rebuilds when a snapshot is dropped in by hand, and only then", async () => {
+  const data = mkdtempSync(`${tmpdir()}/commonplace-`);
+  const only = defineConfig({ sources: [fromFile("export")], mcp: [] });
+
+  snapshot(data, "export", "2026-01-01", [thing({ id: "note:1", kind: "note" })]);
+  expect((await sync(only, data, () => {}))?.built?.things).toBe(1);
+  expect((await sync(only, data, () => {}))?.built).toBeNull();
+
+  snapshot(data, "export", "2026-01-02", [thing({ id: "note:2", kind: "note" })]);
+  expect((await sync(only, data, () => {}))?.built?.things).toBe(2);
 });
 
 const daysAgo = (days: number) => new Date(Date.now() - days * 86_400_000).toLocaleDateString("sv");

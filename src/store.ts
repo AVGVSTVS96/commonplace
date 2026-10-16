@@ -1,5 +1,7 @@
 import { Database, SQLiteError } from "bun:sqlite";
 
+import { iso } from "./schema.ts";
+
 /** One line of a search result or timeline. `id` is citable: pass it to `show`. */
 export interface Hit {
   readonly id: string;
@@ -25,6 +27,9 @@ const parsed = (row: Record<string, unknown> | null) =>
           ["sources", "extra", "collections"].includes(key) ? JSON.parse(String(value)) : value,
         ]),
       );
+
+/** A date or time in any ISO form, as the stored UTC text, so `2026-01-15T00:00-05:00` compares as the instant it is. */
+const at = (value: string | undefined): string | null => (value === undefined ? null : (iso(value) ?? value));
 
 /** Users type words, not FTS5 syntax. When their query doesn't parse, search for the words themselves. */
 const quoted = (q: string) =>
@@ -153,8 +158,8 @@ export const open = (file: string, sources: ReadonlyArray<string>) => {
     }): Array<Hit> =>
       timelineQuery.all({
         allowed,
-        since: options.since ?? null,
-        until: options.until ?? null,
+        since: at(options.since),
+        until: at(options.until),
         verb: options.verb ?? null,
         limit: options.limit ?? 50,
       }),

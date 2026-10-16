@@ -652,8 +652,8 @@ function* youtube(dir: string): Generator<Row> {
 }
 
 /**
- * A Google Takeout export, unzipped into the snapshot: searches, visits, watches and views from
- * My Activity, Maps lists, saved and labeled places and reviews, YouTube subscriptions, playlists,
+ * A Google Takeout export, unzipped into the snapshot, its `Takeout/` folder or what's in it, with
+ * My Activity exported as JSON: searches, visits, watches and views from My Activity, Maps lists, saved and labeled places and reviews, YouTube subscriptions, playlists,
  * comments and uploads. Products you didn't export are simply absent.
  *
  * Left out on purpose: `YouTube and YouTube Music/history` (the same watches and searches as
@@ -662,9 +662,11 @@ function* youtube(dir: string): Generator<Row> {
 export default defineSource({
   name: "takeout",
   rows: function* ({ dir }) {
-    yield* myActivity(dir);
-    yield* savedLists(dir);
-    yield* places(dir);
-    yield* youtube(dir);
+    const root = existsSync(`${dir}/Takeout`) ? `${dir}/Takeout` : dir;
+
+    yield* myActivity(root);
+    yield* savedLists(root);
+    yield* places(root);
+    yield* youtube(root);
   },
 });

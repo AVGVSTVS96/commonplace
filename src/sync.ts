@@ -67,7 +67,8 @@ export interface Synced {
 }
 
 /**
- * Takes today's snapshot of every source that fetches and is due, then rebuilds.
+ * Takes today's snapshot of every source that fetches and is due, then rebuilds if any snapshot,
+ * fetched now or dropped in by hand, is newer than the database.
  * Safe to call from as many hooks as you like: a running sync makes the others return null.
  */
 export const sync = (config: Config, data: string, log: (line: string) => void): Promise<Synced | null> => {
@@ -114,7 +115,12 @@ export const sync = (config: Config, data: string, log: (line: string) => void):
       }
     }
 
-    const stale = fetched.length > 0 || !existsSync(db);
+    const built = existsSync(db) ? statSync(db).mtimeMs : null;
+    const stale =
+      built === null ||
+      config.sources.some((source) =>
+        snapshotsOf(raw, source.name).some((snapshot) => statSync(snapshot.dir).mtimeMs > built),
+      );
 
     return { fetched, failed, built: stale ? await build(config, data) : null };
   });

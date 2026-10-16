@@ -26,7 +26,7 @@ commonplace      CLI ── search · timeline · show · stats
 
 It's a template you own, not an app you install: about 1,300 lines of TypeScript plus one file per source, no runtime dependencies (Bun and its built-in SQLite), in your own repo next to your own data. Read it in an afternoon. Change anything.
 
-- **Agents only see what you allow.** Your data lives in `data/`, which never enters git. Agents never open the database: they go through the CLI or MCP server, which only show the sources you list, and `redact` rules keep rows out of the archive entirely.
+- **You choose what agents see over MCP.** Your data lives in `data/`, which never enters git. Agents never open the database: the MCP server shows only the sources you list, and `redact` rules keep rows out of the archive entirely. The CLI shows every source, to you or to an agent that runs it.
 - **It keeps itself current.** `commonplace sync` takes one snapshot per source per day and rebuilds. On a Mac, `commonplace install` runs it at login, whenever a message arrives, and whenever an agent session ends.
 - **One shape for everything.** Every source becomes things, events and links, with IDs derived from content, so the same page saved in two apps is one record.
 - **Agents write the sources.** The `add-source` skill has your agent write a new source for any app or export you have.
@@ -46,11 +46,11 @@ It's a template you own, not an app you install: about 1,300 lines of TypeScript
 
 Download it once, unzip it into `data/raw/<source>/<YYYY-MM-DD>/`, and the next build reads it. Drop in a newer one whenever you like.
 
-| source      | what                                                                   | the export                                        |
-| ----------- | ---------------------------------------------------------------------- | ------------------------------------------------- |
-| `takeout`   | searches, YouTube watches, comments and playlists, Maps places, Chrome | [Google Takeout](https://takeout.google.com)      |
-| `x-archive` | every post (with long ones in full), like, follow, DM and Grok chat    | X → Settings → Your account → Download an archive |
-| `raindrop`  | bookmarks, collections, tags and highlights                            | Raindrop → Settings → Backups, the CSV            |
+| source      | what                                                                   | the export                                                        |
+| ----------- | ---------------------------------------------------------------------- | ----------------------------------------------------------------- |
+| `takeout`   | searches, YouTube watches, comments and playlists, Maps places, Chrome | [Google Takeout](https://takeout.google.com), My Activity as JSON |
+| `x-archive` | every post (with long ones in full), like, follow, DM and Grok chat    | X → Settings → Your account → Download an archive                 |
+| `raindrop`  | bookmarks, collections, tags and highlights                            | Raindrop → Settings → Backups, the CSV                            |
 
 Your agents run on more than one machine? `prompts({ ssh: "you@server" })` reads that machine's sessions too, as its own source.
 

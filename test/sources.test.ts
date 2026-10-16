@@ -58,6 +58,12 @@ test("takeout: activity verbs come from title prefixes, places and searches get 
       'Comment ID,Comment Create Timestamp,Video ID,Comment Text\nc1,2026-01-03T00:00:00+00:00,abc,"{""text"":""nice""}"\n',
   });
   const rows = await rowsOf(takeout, dir);
+  const unzipped = folder({ "Takeout/My Activity/Search/MyActivity.json": JSON.stringify(activity) });
+
+  expect(await rowsOf(takeout, unzipped)).toEqual(
+    await rowsOf(takeout, folder({ "My Activity/Search/MyActivity.json": JSON.stringify(activity) })),
+  );
+  expect(pick(await rowsOf(takeout, unzipped), "event")).not.toEqual([]);
 
   expect(pick(rows, "event").map((row) => (row.type === "event" ? [row.verb, row.thing] : []))).toEqual([
     ["searched", "query:best ramen"],
@@ -326,6 +332,14 @@ test("prompts: typed turns and chat messages, not the harness, plugins or script
         payload: { type: "user_message", message: "add a test" },
       }),
       JSON.stringify({ type: "turn_context", payload: { model: "gpt-x" } }),
+    ].join("\n"),
+    ".codex/sessions/2026/01/01/scripted.jsonl": [
+      JSON.stringify({ type: "session_meta", payload: { id: "c2", cwd: "/work/api", source: "exec" } }),
+      JSON.stringify({
+        type: "event_msg",
+        timestamp: "2026-01-01T02:00:00.000Z",
+        payload: { type: "user_message", message: "Reply with just: ok" },
+      }),
     ].join("\n"),
   });
   const saved = {

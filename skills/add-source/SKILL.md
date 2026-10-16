@@ -34,7 +34,7 @@ Check `sources/` before writing one. X (bookmarks with folders, likes, posts, re
    - **Times are real or null.** `iso()` the source's own timestamp; never use the fetch time or guess.
    - Every event's thing must be emitted by some source, or the build drops the event. A link may point at a thing nobody defined, like the post a reply answers.
    - Put the app's folder, list, or tag names in the event's `collections`.
-   - If a local file changes whenever there's something new (an app's database), list it in `watch` so the LaunchAgent syncs on it.
+   - If a local file changes whenever there's something new (an app's database), list it in `watch` so the LaunchAgent syncs on it, then run `commonplace install` again to pick it up.
 
 4. **Register it** in `commonplace.config.ts`: add it to `sources` (earlier sources win when two disagree on a field), and add its name to `mcp` only if the user wants MCP clients to read it. Ask before exposing anything personal like messages, mail, or health data. Suggest `redact` rules for anything they'd rather keep out entirely.
 

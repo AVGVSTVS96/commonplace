@@ -1,6 +1,7 @@
 #!/usr/bin/env bun
 import { Database } from "bun:sqlite";
-import { existsSync } from "node:fs";
+import { existsSync, statSync } from "node:fs";
+import { dirname } from "node:path";
 import { parseArgs } from "node:util";
 
 import config from "../commonplace.config.ts";
@@ -27,7 +28,7 @@ const usage = `commonplace: your personal data kit for agents
   --json      machine-readable output
   --limit n   how many results`;
 
-const root = new URL("..", import.meta.url).pathname.replace(/\/$/, "");
+const root = dirname(import.meta.dir);
 const data = process.env["COMMONPLACE_DATA"] ?? `${root}/data`;
 const { db } = paths(data);
 const everything = config.sources.map(({ name }) => name);
@@ -127,7 +128,17 @@ switch (values.help === true ? "help" : (command ?? "help")) {
     break;
   case "mcp": {
     const sources = values.sources?.split(",").map((s) => s.trim()) ?? config.mcp;
-    await serve(store(sources.filter((s) => config.mcp.includes(s))), pkg.version);
+    const allowed = sources.filter((s) => config.mcp.includes(s));
+    let current = { store: store(allowed), at: statSync(db).mtimeMs };
+    // A sync renames a new database over the old one, so a long-lived server reopens it.
+    await serve(() => {
+      const at = statSync(db).mtimeMs;
+      if (at !== current.at) {
+        current.store.close();
+        current = { store: store(allowed), at };
+      }
+      return current.store;
+    }, pkg.version);
     break;
   }
   case "sql": {

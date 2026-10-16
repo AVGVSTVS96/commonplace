@@ -92,7 +92,7 @@ const parse = (line: string): Request | null => {
 };
 
 /** A Model Context Protocol server over stdio: newline-delimited JSON-RPC, tools only. */
-export const serve = async (store: Store, version: string): Promise<void> => {
+export const serve = async (latest: () => Store, version: string): Promise<void> => {
   const result = (request: Request): object | null => {
     switch (request.method) {
       case "initialize":
@@ -106,7 +106,11 @@ export const serve = async (store: Store, version: string): Promise<void> => {
       case "tools/list":
         return { tools };
       case "tools/call":
-        return call(store, String(request.params?.["name"]), (request.params?.["arguments"] ?? {}) as Args);
+        return call(
+          latest(),
+          String(request.params?.["name"]),
+          (request.params?.["arguments"] ?? {}) as Args,
+        );
       default:
         return null;
     }
