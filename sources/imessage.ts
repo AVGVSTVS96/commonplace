@@ -1,4 +1,5 @@
 import { Database } from "bun:sqlite";
+import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 
 import { event, thing } from "../src/schema.ts";
@@ -7,8 +8,11 @@ import { defineSource, jsonl, type Source, writeJsonl } from "../src/source.ts";
 export interface Chat {
   readonly guid: string;
   readonly name: string | null;
+  readonly service: string | null;
   readonly group: boolean;
   readonly handles: ReadonlyArray<string>;
+  /** A 1:1 chat Messages never made a row for, named after its one handle. */
+  readonly inferred: boolean;
 }
 
 export interface Message {
@@ -20,50 +24,69 @@ export interface Message {
   readonly text: string | null;
   readonly service: string;
   readonly attachments: boolean;
-  readonly reaction: string | null;
-}
-
-interface MessageRow {
-  readonly guid: string;
-  readonly text: string | null;
-  readonly body: Uint8Array | null;
-  readonly date: number;
-  readonly from_me: number;
-  readonly associated: number;
-  readonly service: string;
-  readonly attachments: number;
-  readonly handle: string | null;
-  readonly chat: string;
+  /** What a tapback, sticker or app message does to the message it points at. */
+  readonly associated: {
+    readonly kind: string;
+    readonly removed: boolean;
+    readonly to: string | null;
+  } | null;
+  /** Filed under its sender's 1:1 chat because Messages joined it to none. */
+  readonly inferred: boolean;
 }
 
 /** Messages files a 1:1 chat as `any;-;<handle>`, and some messages have no chat row of their own. */
 const oneToOne = (handle: string) => `'any;-;' || ${handle}`;
 
 const chatsSql = `
-  SELECT guid, nullif(display_name, '') AS name, style = 43 AS "group",
+  SELECT guid, nullif(display_name, '') AS name, service_name AS service, style = 43 AS "group",
     (SELECT json_group_array(id) FROM (
       SELECT DISTINCT h.id FROM chat_handle_join j JOIN handle h ON h.ROWID = j.handle_id
-      WHERE j.chat_id = chat.ROWID ORDER BY h.id)) AS handles
-  FROM chat`;
+      WHERE j.chat_id = chat.ROWID ORDER BY h.id)) AS handles,
+    0 AS inferred
+  FROM chat
+  UNION ALL
+  SELECT ${oneToOne("h.id")}, NULL, min(m.service), 0, json_array(h.id), 1
+  FROM message m JOIN handle h ON h.ROWID = m.handle_id
+  WHERE m.item_type = 0
+    AND NOT EXISTS (SELECT 1 FROM chat_message_join j WHERE j.message_id = m.ROWID)
+    AND NOT EXISTS (SELECT 1 FROM chat c WHERE c.guid = ${oneToOne("h.id")})
+  GROUP BY h.id
+  ORDER BY 1`;
 
 const messagesSql = `
-  SELECT m.guid, m.text, m.attributedBody AS body, m.date, m.is_from_me AS from_me,
-    m.associated_message_type AS associated, m.service, m.cache_has_attachments AS attachments,
-    h.id AS handle,
+  SELECT m.guid, m.text, m.attributedBody AS body, cast(m.date AS TEXT) AS date, m.is_from_me AS from_me,
+    m.associated_message_type AS associated, m.associated_message_guid AS associated_to, m.service,
+    m.cache_has_attachments AS attachments, h.id AS handle,
     coalesce(
       (SELECT min(c.guid) FROM chat_message_join j JOIN chat c ON c.ROWID = j.chat_id WHERE j.message_id = m.ROWID),
-      ${oneToOne("h.id")}) AS chat
+      ${oneToOne("h.id")}) AS chat,
+    NOT EXISTS (SELECT 1 FROM chat_message_join j WHERE j.message_id = m.ROWID) AS inferred
   FROM message m LEFT JOIN handle h ON h.ROWID = m.handle_id
   WHERE m.item_type = 0 AND m.date >= $after
-  ORDER BY m.date`;
+  ORDER BY m.ROWID`;
 
-const appleEpoch = Date.UTC(2001, 0, 1);
+interface MessageRow {
+  readonly guid: string;
+  readonly text: string | null;
+  readonly body: Uint8Array | null;
+  readonly date: string;
+  readonly from_me: number;
+  readonly associated: number;
+  readonly associated_to: string | null;
+  readonly service: string;
+  readonly attachments: number;
+  readonly handle: string | null;
+  readonly chat: string | null;
+  readonly inferred: number;
+}
+
+const appleEpoch = 978_307_200_000n;
 
 /** `message.date` counts from 2001-01-01 UTC: nanoseconds since macOS 10.13, seconds before. */
-const appleTime = (date: number): string =>
-  new Date(appleEpoch + (date > 1e11 ? date / 1e6 : date * 1000)).toISOString();
+const appleTime = (date: bigint): string =>
+  new Date(Number(appleEpoch + (date > 100_000_000_000n ? date / 1_000_000n : date * 1000n))).toISOString();
 
-const appleDate = (iso: string): number => (Date.parse(iso) - appleEpoch) * 1e6;
+const appleDate = (iso: string): bigint => (BigInt(Date.parse(iso)) - appleEpoch) * 1_000_000n;
 
 /**
  * The plain text of an NSAttributedString typedstream: `NSString`, four header bytes, `+`, a length
@@ -86,96 +109,140 @@ const bodyText = (body: Uint8Array): string | null => {
 
 const tapbacks = ["love", "like", "dislike", "laugh", "emphasize", "question", "emoji", "sticker"];
 
-const reactionOf = (associated: number): string | null =>
-  associated >= 2000 && associated < 4000
-    ? `${associated >= 3000 ? "removed " : ""}${tapbacks[associated % 1000] ?? "reaction"}`
-    : null;
+const associationOf = (type: number, to: string | null): Message["associated"] =>
+  type === 0
+    ? null
+    : {
+        kind:
+          type === 2 || type === 3
+            ? "app"
+            : type === 1000
+              ? "sticker"
+              : type >= 2000 && type < 4000
+                ? (tapbacks[type % 1000] ?? "reaction")
+                : String(type),
+        removed: type >= 3000 && type < 4000,
+        to,
+      };
+
+/** Every chat, and every message on or after `after` (Apple time), from a Messages database. */
+const read = (file: string, after: bigint) => {
+  const db = new Database(file, { readonly: true, strict: true });
+
+  try {
+    const chats = db
+      .query<
+        {
+          guid: string;
+          name: string | null;
+          service: string | null;
+          group: number;
+          handles: string;
+          inferred: number;
+        },
+        []
+      >(chatsSql)
+      .all()
+      .map((row): Chat => ({
+        guid: row.guid,
+        name: row.name,
+        service: row.service,
+        group: row.group === 1,
+        handles: JSON.parse(row.handles),
+        inferred: row.inferred === 1,
+      }));
+    const messages = db
+      .query<MessageRow, { after: bigint }>(messagesSql)
+      .all({ after })
+      .flatMap((row): Array<Message> =>
+        row.chat === null
+          ? []
+          : [
+              {
+                guid: row.guid,
+                chat: row.chat,
+                handle: row.handle,
+                from_me: row.from_me === 1,
+                ts: appleTime(BigInt(row.date)),
+                text: row.text ?? (row.body === null ? null : bodyText(row.body)),
+                service: row.service,
+                attachments: row.attachments === 1,
+                associated: associationOf(row.associated, row.associated_to),
+                inferred: row.inferred === 1,
+              },
+            ],
+      );
+
+    return { chats, messages };
+  } finally {
+    db.close();
+  }
+};
 
 export interface Options {
-  /** Messages that never leave chat.db: they are dropped before the snapshot is written. */
+  /** Messages that never leave Messages: they are dropped before the snapshot is written. */
   readonly drop?: (message: Message, chat: Chat | undefined) => boolean;
 }
 
-/** Your iMessage and SMS conversations, read from the Messages database on this Mac (needs Full Disk Access). */
-export const imessage = ({ drop }: Options = {}): Source =>
-  defineSource({
+/**
+ * Your iMessage and SMS conversations, read from the Messages database on this Mac (needs Full Disk Access).
+ * A snapshot holds the chats and the new days' messages, or a whole `chat.db`, like a copy from an old Mac.
+ */
+export const imessage = ({ drop }: Options = {}): Source => {
+  const kept = (chats: ReadonlyArray<Chat>, messages: ReadonlyArray<Message>) => {
+    const byGuid = new Map(chats.map((chat) => [chat.guid, chat]));
+
+    return messages.filter((message) => drop?.(message, byGuid.get(message.chat)) !== true);
+  };
+
+  return defineSource({
     name: "imessage",
+    watch: [`${homedir()}/Library/Messages/chat.db-wal`],
 
     /** Starts a day before the last snapshot so no timezone can open a gap; repeats merge away by ID. */
     fetch: async ({ dir, since }) => {
-      const db = new Database(`${homedir()}/Library/Messages/chat.db`, { readonly: true, strict: true });
-      const after = since === null ? 0 : appleDate(since) - 86_400 * 1e9;
+      const after = since === null ? 0n : appleDate(since) - 86_400_000_000_000n;
+      const { chats, messages } = read(`${homedir()}/Library/Messages/chat.db`, after);
 
-      try {
-        const chats = db
-          .query<{ guid: string; name: string | null; group: number; handles: string }, []>(chatsSql)
-          .all()
-          .map((row): Chat => ({
-            guid: row.guid,
-            name: row.name,
-            group: row.group === 1,
-            handles: JSON.parse(row.handles),
-          }));
-        const byGuid = new Map(chats.map((chat) => [chat.guid, chat]));
-        const messages = db
-          .query<MessageRow, { after: number }>(messagesSql)
-          .all({ after })
-          .map((row): Message => ({
-            guid: row.guid,
-            chat: row.chat,
-            handle: row.handle,
-            from_me: row.from_me === 1,
-            ts: appleTime(row.date),
-            text: row.text ?? (row.body === null ? null : bodyText(row.body)),
-            service: row.service,
-            attachments: row.attachments === 1,
-            reaction: reactionOf(row.associated),
-          }))
-          .filter((message) => drop?.(message, byGuid.get(message.chat)) !== true);
-
-        await writeJsonl(`${dir}/chats.jsonl`, chats);
-        await writeJsonl(`${dir}/messages.jsonl`, messages);
-      } finally {
-        db.close();
-      }
+      await writeJsonl(`${dir}/chats.jsonl`, chats);
+      await writeJsonl(`${dir}/messages.jsonl`, kept(chats, messages));
     },
 
     rows: async function* ({ dir }) {
-      const chats = new Map<string, Chat>();
+      const whole = existsSync(`${dir}/chat.db`) ? read(`${dir}/chat.db`, 0n) : null;
+      const chats = whole?.chats ?? (await Array.fromAsync(jsonl<Chat>(`${dir}/chats.jsonl`)));
+      const messages = whole === null ? jsonl<Message>(`${dir}/messages.jsonl`) : kept(chats, whole.messages);
 
-      for await (const chat of jsonl<Chat>(`${dir}/chats.jsonl`)) {
-        chats.set(chat.guid, chat);
+      for (const chat of chats) {
+        yield thing({
+          id: `chat:imessage:${chat.guid}`,
+          kind: "chat",
+          title: chat.name ?? chat.handles.join(", "),
+          extra: {
+            service: chat.service,
+            group: chat.group,
+            handles: [...chat.handles],
+            inferred: chat.inferred,
+          },
+        });
       }
 
-      const seen = new Set<string>();
-
-      for await (const message of jsonl<Message>(`${dir}/messages.jsonl`)) {
-        const id = `chat:imessage:${message.chat}`;
-        const chat = chats.get(message.chat);
-
-        if (!seen.has(id)) {
-          seen.add(id);
-          yield thing({
-            id,
-            kind: "chat",
-            title: chat?.name ?? chat?.handles.join(", ") ?? message.handle,
-            extra: { group: chat?.group ?? false, handles: [...(chat?.handles ?? [])] },
-          });
-        }
-
+      for await (const message of messages) {
         yield event({
           verb: message.from_me ? "sent" : "received",
-          thing: id,
+          thing: `chat:imessage:${message.chat}`,
           ts: message.ts,
           text: message.text === "" ? null : message.text,
           key: message.guid,
           extra: {
-            from: message.from_me ? null : message.handle,
             service: message.service,
+            from: message.from_me ? null : message.handle,
             attachments: message.attachments,
-            reaction: message.reaction,
+            associated: message.associated,
+            inferred_chat: message.inferred,
           },
         });
       }
     },
   });
+};
