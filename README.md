@@ -150,19 +150,18 @@ export default defineConfig({
   // strongest first: when two sources disagree on a field, the earlier one wins
   sources: [github(), prompts(), imessage()],
 
-  // rows that never reach the archive
+  // rows that never reach the database; their snapshots keep them
   redact: (row) => row.type === "event" && /\b(password|api[_ -]?key|secret)\b/i.test(row.text ?? ""),
 });
 ```
 
-Some sources take options. `imessage({ drop: (message, chat) => … })` keeps matching messages out of the snapshot itself, so they never exist anywhere but Messages.
+Some sources take options. `imessage({ drop: (message, chat) => … })` keeps matching messages out of new snapshots, so from then on they exist only in Messages. Run `commonplace build` after changing `redact` or `sources`.
 
 ## How it works
 
 - **`data/raw/<source>/<date>/`** is the source of truth, kept forever. Each fetch writes through a `.partial` directory and makes the snapshot read-only, so a crash never leaves half of one. A second snapshot of one day, like one merged in from another archive, is `<date>.<label>`.
 - **`commonplace.db`** is SQLite: `things`, `events`, `links`, a `snapshots` log, and a full-text `search` index that matches word forms (trip finds trips). Every build starts empty and replays every snapshot, so the same `raw/` always gives the same database, and a fixed source rebuilds years of history.
 - **Merging** needs no fuzzy matching. Things merge by ID; per field, the strongest source's newest value wins and nulls never erase. Once-only events (`saved`, `liked`, …) merge across sources and keep every collection.
-- **Visibility** is all-or-nothing per row: a reader sees a row only if it may read every source that contributed to it, so a hidden source can't leak through a merge.
 - **A source** is one file with two halves: `fetch` copies what the service gives into today's snapshot, and `rows` turns one snapshot into things, events and links, reading nothing else.
 
 ```
