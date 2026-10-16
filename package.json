@@ -2,7 +2,7 @@
   "name": "commonplace",
   "version": "0.1.0",
   "private": true,
-  "description": "Your personal data kit for agents: a private, always-current archive of your digital life, behind one CLI and MCP server.",
+  "description": "Your personal data kit for agents: your accounts, local files and exports in one archive on your machine, searched through a CLI and MCP server.",
   "license": "MIT",
   "bin": {
     "commonplace": "src/cli.ts"

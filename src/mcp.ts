@@ -6,7 +6,7 @@ const tools = [
   {
     name: "search",
     description:
-      'Full-text search over everything the user has made, saved and said (SQLite FTS5: words, "exact phrases", prefix*, OR, NOT). Matches word forms (trip finds trips), not meanings, so try synonyms when results are thin. Returns citable ids; pass one to show for the whole record.',
+      'Full-text search over the records in the user\'s archive (SQLite FTS5: words, "exact phrases", prefix*, OR, NOT). Matches word forms (trip finds trips), not meanings, so try synonyms when results are thin. Returns citable ids; pass one to show for the whole record.',
     inputSchema: {
       type: "object",
       properties: {
@@ -67,7 +67,7 @@ const call = (store: Store, name: string, args: Args) => {
         }),
       );
     case "show":
-      return text(store.show(string("id") ?? "") ?? `No visible record with id ${string("id")}`);
+      return text(store.show(string("id") ?? "") ?? `No record with id ${string("id")}`);
     case "stats":
       return text(store.stats());
     default:

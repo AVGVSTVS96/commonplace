@@ -5,16 +5,14 @@
   </picture>
 </h1>
 
-**Your personal data kit for agents.** A commonplace book for the age of agents.
+**Your personal data kit for agents.**
+
+commonplace brings data from your accounts, local files and exports into one archive on your machine. Your agents search it through a CLI or MCP server. Ask a coding agent to add another source, and it writes the code in your repo.
 
 [Website](https://commonplace-eight-sable.vercel.app) · [Start](#start) · [Sources](#sources) · [How it works](#how-it-works)
 
-People like Bacon and Locke kept a commonplace book: one notebook for everything they read, saved and thought, added to for life. commonplace keeps yours for you. It copies everything you've made, saved and said into a private archive on your machine, keeps it current, and gives every agent you use one safe door to it.
-
-Not just your GitHub. Your texts, your mail, your review comments, what you watched, what you saved, what you liked, every prompt you ever typed. That's where your taste and judgment live, and an agent that can search it stops guessing what you mean.
-
 ```
-your accounts    GitHub, Claude Code, Codex, …
+your data        accounts, local files, exports
      │  fetch: one dated snapshot per source per day
 data/raw/        read-only, kept forever, never in git
      │  build: replay every snapshot, redact as you go
@@ -24,23 +22,23 @@ commonplace      CLI ── search · timeline · show · stats
      └── mcp     Claude Code, Codex, Claude Desktop, any MCP client
 ```
 
-It's a template you own, not an app you install: about 1,300 lines of TypeScript plus one file per source, no runtime dependencies (Bun and its built-in SQLite), in your own repo next to your own data. Read it in an afternoon. Change anything.
+It's a template you own: about 1,300 lines in the core, plus one file per source. Bun and its built-in SQLite, with no runtime packages, in your own repo next to your own data. Read it in an afternoon. Change anything.
 
-- **You choose what goes in.** Your data lives in `data/`, never in git. Agents read it through the CLI or MCP, never the database file, and see everything in it, so what they shouldn't see stays out: leave the source off, or keep rows out with `redact` and a source's own `drop`.
-- **It keeps itself current.** `commonplace sync` takes one snapshot per source per day and rebuilds. On a Mac, `commonplace install` runs it at login, whenever a message arrives, and whenever an agent session ends.
+- **Agents write the sources.** The [`add-source`](skills/add-source/SKILL.md) skill has your coding agent write one for any app or export you have, run it and check what landed.
 - **One shape for everything.** Every source becomes things, events and links, with IDs derived from content, so the same page saved in two apps is one record.
-- **Agents write the sources.** The `add-source` skill has your agent write one for any app or export you have.
+- **Dated snapshots.** `commonplace sync` takes at most one snapshot per source per day, then rebuilds if anything is new. On a Mac, `commonplace install` runs it at login and when Messages changes, and the Claude Code plugin runs it when a session ends. Export sources update when you add a newer export.
+- **You choose what you collect and expose.** Data stays in your local `data/` folder, which the template keeps out of git. Connected agents can read everything in the built archive, and may send what they read to their model provider. `drop` keeps matching messages out of new snapshots; `redact` keeps rows out of the database, and the raw snapshots stay on disk.
 
 ## Sources
 
 ### Built in
 
-| source     | what                                                                                | needs                                      |
-| ---------- | ----------------------------------------------------------------------------------- | ------------------------------------------ |
-| `github`   | your pull requests and issues, your reviews and review comments, stars, and commits | `gh` signed in                             |
-| `prompts`  | every prompt you typed into Claude Code, Codex and Pi, and sent them from chat apps | nothing, read from disk                    |
-| `imessage` | every iMessage and SMS conversation                                                 | macOS, Full Disk Access                    |
-| `x`        | your bookmarks with their folders, likes, posts and replies                         | a browser on your machine, [signed in](#x) |
+| source     | what                                                                                | needs                                                   |
+| ---------- | ----------------------------------------------------------------------------------- | ------------------------------------------------------- |
+| `github`   | your pull requests and issues, your reviews and review comments, stars, and commits | `gh` signed in                                          |
+| `prompts`  | every prompt you typed into Claude Code, Codex and Pi, and sent them from chat apps | nothing, read from disk                                 |
+| `imessage` | every iMessage and SMS conversation                                                 | macOS, Full Disk Access                                 |
+| `x`        | your bookmarks with their folders, likes, posts and replies                         | `agent-browser`, [signed in to X](#x). No paid API key. |
 
 ### From an export
 
@@ -75,9 +73,9 @@ sources: [github(), prompts(), x()],
 
 If X signs the session out, the next sync fails with the sign-in command.
 
-### One ask away
+### Written by your agent
 
-Anything with an export, a local database, an API or a CLI. Ask your agent, _"add my Obsidian vault to commonplace"_, and the [`add-source`](skills/add-source/SKILL.md) skill has it write the source: one file, usually under 80 lines. Any agent that reads files can use it, not just Claude Code.
+Anything with an export, a local database, an API or a CLI. Ask your agent, _"add my browser history to commonplace"_, and the [`add-source`](skills/add-source/SKILL.md) skill has it write the source, run it and check what landed: one file in your repo. Any coding agent with file and terminal access can follow the skill, not just Claude Code.
 
 - **Browsing:** Chrome, Safari, Firefox, Edge, Arc or any other browser's history
 - **Notes:** Obsidian or any folder of markdown, Apple Notes
@@ -87,7 +85,7 @@ Anything with an export, a local database, an API or a CLI. Ask your agent, _"ad
 
 ## Start
 
-You need [Bun](https://bun.sh) and, for the GitHub source, the [GitHub CLI](https://cli.github.com) signed in.
+You need [Bun](https://bun.sh) and, for the GitHub source, the [GitHub CLI](https://cli.github.com) signed in. On a Mac, the iMessage source is on by default and needs Full Disk Access: give it to your terminal before the first sync (System Settings → Privacy & Security → Full Disk Access). X is off until you [sign in and add it](#x).
 
 ```sh
 gh repo create my-commonplace --template AVGVSTVS96/commonplace --private --clone
@@ -168,7 +166,7 @@ Some sources take options. `imessage({ drop: (message, chat) => … })` keeps ma
 src/schema.ts     things, events, links; verbs
 src/source.ts     defineSource and the read helpers
 src/build.ts      replays every snapshot; the only writer
-src/store.ts      every read, filtered by what the reader may see
+src/store.ts      every read
 src/sync.ts       daily snapshots on demand, then the build
 src/install.ts    the LaunchAgent that runs sync on its own
 src/cli.ts        one door
@@ -176,10 +174,14 @@ src/mcp.ts        the other
 sources/*.ts      one file per source
 ```
 
+## The name
+
+People like Bacon and Locke kept a commonplace book: one notebook for everything they read, saved and thought, added to for life. This one is for the age of agents.
+
 ## Next
 
 - Remote MCP for ChatGPT and claude.ai on the web
-- Mail, calendars and browser history
+- Mail, calendars and live browser history (Takeout already has Chrome's)
 - Yours, if you send one back
 
 MIT

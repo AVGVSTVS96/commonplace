@@ -15,7 +15,7 @@ bun run fix     # autofix lint and format
 src/schema.ts           things, events, links, verbs; thing() event() link() iso() urlRef() digest()
 src/source.ts           defineSource and the readers: json, jsonl, lines, csv
 src/build.ts            replays every snapshot into the database; the only writer
-src/store.ts            every read, filtered by the sources the reader may see
+src/store.ts            every read
 src/sync.ts             today's snapshots, then a build if anything is new
 src/install.ts          the macOS LaunchAgent, and the fixed binary (src/launcher.ts) it runs
 src/cli.ts, src/mcp.ts  the two doors, both through store.ts
