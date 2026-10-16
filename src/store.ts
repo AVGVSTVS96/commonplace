@@ -70,7 +70,7 @@ export const open = (file: string, sources: ReadonlyArray<string>) => {
       limit: number;
     }
   >(`
-    SELECT e.id, e.verb AS what, coalesce(e.ts, t.created_at) AS at, t.title, t.url, ${clip("e.text", 300)} AS text
+    SELECT e.id, e.verb AS what, coalesce(e.ts, t.created_at) AS at, t.title, t.url, ${clip("coalesce(e.text, t.text)", 300)} AS text
     FROM events e JOIN things t ON t.id = e.thing_id
     WHERE ${visible("e.sources")} AND ${visible("t.sources")}
       AND ($verb IS NULL OR e.verb = $verb)
