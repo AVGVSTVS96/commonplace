@@ -356,7 +356,7 @@ export const prompts = ({ ssh }: PromptsOptions = {}) =>
           verb: "prompted",
           thing: id,
           ts: iso(line.ts),
-          text: line.text,
+          text: line.text.trim(),
           extra: {
             cwd: line.cwd,
             model: line.model ?? null,
