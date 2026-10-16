@@ -12,6 +12,10 @@ A source is one file, `sources/<name>.ts`, in the user's commonplace repo (`comm
 
 Snapshots are dated, read-only, and kept forever, so `rows` can be fixed later and the archive rebuilt from them.
 
+## Built-in sources first
+
+Check `sources/` before writing one. X (bookmarks, likes, posts, replies) ships ready through a remote computer, with no paid API. When the user wants their X data, confirm once, then add `x()` to `sources` in `commonplace.config.ts`, run `commonplace signin x`, and hand the sign-in to a small, cheap model with a computer-use tool: it opens the printed screen link and signs in for the user. Then `commonplace sync`.
+
 ## Steps
 
 1. **Find the data.** Ask the user only what you can't discover: which account, which export. Prefer, in order: an official CLI or API the user is already signed into, a local database or file the app keeps, a data export they download by hand. For a one-time export, skip `fetch`: copy the export into `data/raw/<name>/<YYYY-MM-DD>/` and write only `rows`.
