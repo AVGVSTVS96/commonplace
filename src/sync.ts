@@ -10,14 +10,12 @@ import {
   writeFileSync,
 } from "node:fs";
 
-import { build, type Built, paths, snapshotsOf } from "./build.ts";
+import { build, type Built, errorMessage, paths, snapshotsOf } from "./build.ts";
 import type { Config } from "./config.ts";
 
 const today = (): string => new Date().toLocaleDateString("sv");
 
 const days = (from: string, to: string): number => (Date.parse(to) - Date.parse(from)) / 86_400_000;
-
-const stateOf = (data: string, source: string): string => `${data}/state/${source}`;
 
 const alive = (pid: number): boolean => {
   try {
@@ -100,26 +98,23 @@ export const sync = (config: Config, data: string, log: (line: string) => void):
         await source.fetch({
           dir: partial,
           since: previous?.date ?? null,
-          state: stateOf(data, source.name),
+          state: `${data}/state/${source.name}`,
         });
         readOnly(partial);
         renameSync(partial, final);
         fetched.push(source.name);
       } catch (error) {
         rmSync(partial, { recursive: true, force: true });
-        failed.push({
-          source: source.name,
-          error: error instanceof Error ? error.message : String(error),
-        });
-        log(`${source.name} failed: ${failed.at(-1)?.error}`);
+        failed.push({ source: source.name, error: errorMessage(error) });
+        log(`${source.name} failed: ${errorMessage(error)}`);
       }
     }
 
-    const built = existsSync(db) ? statSync(db).mtimeMs : null;
+    const builtAt = existsSync(db) ? statSync(db).mtimeMs : null;
     const stale =
-      built === null ||
+      builtAt === null ||
       config.sources.some((source) =>
-        snapshotsOf(raw, source.name).some((snapshot) => statSync(snapshot.dir).mtimeMs > built),
+        snapshotsOf(raw, source.name).some((snapshot) => statSync(snapshot.dir).mtimeMs > builtAt),
       );
 
     return { fetched, failed, built: stale ? await build(config, data) : null };

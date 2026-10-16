@@ -71,11 +71,15 @@ const entries = <T>(dir: string, name: string): Array<T> => {
 const unescape = (text: string): string =>
   text.replaceAll("&lt;", "<").replaceAll("&gt;", ">").replaceAll("&amp;", "&");
 
-const time = (value: string): string =>
-  iso(value) ??
-  (() => {
+const time = (value: string): string => {
+  const at = iso(value);
+
+  if (at === null) {
     throw new Error(`not a time: ${value}`);
-  })();
+  }
+
+  return at;
+};
 
 /** One row per thing and per link, the first value of each field winning, so records come before stubs. */
 function* distinct(rows: Iterable<Row>): Generator<Row> {

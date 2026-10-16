@@ -18,7 +18,7 @@ const usage = `commonplace: your personal data kit for agents
   commonplace timeline           what you did, newest first  --since --until --verb
   commonplace show <id>          one record with its events and links
   commonplace stats              sources, freshness, kinds, verbs
-  commonplace sync               snapshot every source due today, then rebuild
+  commonplace sync               snapshot every source due today, then rebuild if anything is new
   commonplace install            sync on its own: at login, on new messages, when a hook kicks it (macOS)
   commonplace build              rebuild the database from data/raw
   commonplace mcp                MCP server on stdio  --sources a,b to narrow what a client sees
@@ -54,8 +54,9 @@ const fail = (message: string): never => {
   process.exit(1);
 };
 
-const store = (sources: ReadonlyArray<string>) =>
-  existsSync(db) ? open(db, sources) : fail("No archive yet. Run `commonplace sync` first.");
+const archive = (): string => (existsSync(db) ? db : fail("No archive yet. Run `commonplace sync` first."));
+
+const store = (sources: ReadonlyArray<string>) => open(archive(), sources);
 
 const lines = (hits: ReadonlyArray<Hit>): string =>
   hits
@@ -142,10 +143,7 @@ switch (values.help === true ? "help" : (command ?? "help")) {
     break;
   }
   case "sql": {
-    if (!existsSync(db)) {
-      fail("No archive yet. Run `commonplace sync` first.");
-    }
-    const rows = new Database(db, { readonly: true }).query(rest.join(" ")).all();
+    const rows = new Database(archive(), { readonly: true }).query(rest.join(" ")).all();
     console.log(JSON.stringify(rows, null, 1));
     break;
   }

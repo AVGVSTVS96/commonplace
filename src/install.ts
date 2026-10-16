@@ -4,7 +4,7 @@ import { homedir } from "node:os";
 
 import type { Config } from "./config.ts";
 
-export const label = "dev.commonplace.sync";
+const label = "dev.commonplace.sync";
 
 const xml = (text: string) => text.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
 

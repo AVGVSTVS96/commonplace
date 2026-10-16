@@ -143,7 +143,7 @@ const findClones = (roots: ReadonlyArray<string>, depth = 4): Array<string> => {
   return found.toSorted();
 };
 
-/** Your commits in every clone whose origin is on GitHub, one line per commit per clone. */
+/** Your commits in one clone, if its origin is on GitHub. */
 const commitsIn = async (clone: string, authors: ReadonlyArray<string>): Promise<Array<Commit>> => {
   const remote = (await $`git -C ${clone} remote get-url origin`.quiet().nothrow().text()).trim();
   const repo = /github\.com[:/]([\w.-]+\/[\w.-]+?)(\.git)?\/?$/.exec(remote)?.[1];

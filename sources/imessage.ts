@@ -179,7 +179,7 @@ const read = (file: string, after: bigint) => {
   }
 };
 
-export interface Options {
+export interface IMessageOptions {
   /** Messages that never leave Messages: they are dropped before the snapshot is written. */
   readonly drop?: (message: Message, chat: Chat | undefined) => boolean;
 }
@@ -188,7 +188,7 @@ export interface Options {
  * Your iMessage and SMS conversations, read from the Messages database on this Mac (needs Full Disk Access).
  * A snapshot holds the chats and the new days' messages, or a whole `chat.db`, like a copy from an old Mac.
  */
-export const imessage = ({ drop }: Options = {}): Source => {
+export const imessage = ({ drop }: IMessageOptions = {}): Source => {
   const kept = (chats: ReadonlyArray<Chat>, messages: ReadonlyArray<Message>) => {
     const byGuid = new Map(chats.map((chat) => [chat.guid, chat]));
 

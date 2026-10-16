@@ -1,4 +1,5 @@
 import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { basename } from "node:path";
 
 import { digest, event, type Extra, link, type Ref, type Row, thing, urlRef } from "../src/schema.ts";
 import { csv as records, defineSource } from "../src/source.ts";
@@ -49,8 +50,6 @@ const listed = (dir: string, pattern: RegExp): Array<string> =>
         .toSorted()
         .map((name) => `${dir}/${name}`)
     : [];
-
-const baseName = (path: string): string => path.split("/").at(-1) ?? path;
 
 /** Where a link really goes: Google's `/url?q=` redirect is unwrapped. */
 const destination = (raw: string): string => {
@@ -454,7 +453,7 @@ const nonEmpty = (value: string): string | null => (value.trim() === "" ? null :
 /** `Saved/<list>.csv`: one Maps list per file, named by the file. Lists can hold web pages too. No save time is recorded. */
 function* savedLists(dir: string): Generator<Row> {
   for (const file of listed(`${dir}/Saved`, /\.csv$/)) {
-    const list = baseName(file).replace(/\.csv$/, "");
+    const list = basename(file, ".csv");
 
     for (const [row, at] of csv(file, ["Title", "Note", "URL", "Tags", "Comment"])) {
       const target =
@@ -580,7 +579,7 @@ function* youtube(dir: string): Generator<Row> {
   }
 
   for (const file of listed(`${root}/playlists`, /-videos\.csv$/)) {
-    const playlist = baseName(file).replace(/-videos\.csv$/, "");
+    const playlist = basename(file, "-videos.csv");
 
     for (const [row, at] of csv(file, ["Video ID", "Playlist Video Creation Timestamp"])) {
       const target = video(row["Video ID"]);
@@ -652,9 +651,9 @@ function* youtube(dir: string): Generator<Row> {
 }
 
 /**
- * A Google Takeout export, unzipped into the snapshot, its `Takeout/` folder or what's in it, with
- * My Activity exported as JSON: searches, visits, watches and views from My Activity, Maps lists, saved and labeled places and reviews, YouTube subscriptions, playlists,
- * comments and uploads. Products you didn't export are simply absent.
+ * A Google Takeout export unzipped into the snapshot (its `Takeout/` folder, or what's in it), with My Activity
+ * as JSON: searches, visits, watches and views from My Activity; Maps lists, saved and labeled places and
+ * reviews; YouTube subscriptions, playlists, comments and uploads. Products you didn't export are simply absent.
  *
  * Left out on purpose: `YouTube and YouTube Music/history` (the same watches and searches as
  * My Activity), and Calendar, Play Store, Discover and Timeline settings, which no verb fits.

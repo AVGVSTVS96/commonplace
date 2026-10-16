@@ -7,7 +7,7 @@ import { type Event, type Extra, isOnce, type Link, problem, type Row, type Thin
 import type { Snapshot, Source } from "./source.ts";
 
 /** `<YYYY-MM-DD>`, or `<YYYY-MM-DD>.<label>` for a second snapshot of one day, like an archive merged in from elsewhere. */
-export const datePattern = /^\d{4}-\d{2}-\d{2}(\.[\w-]+)?$/;
+const datePattern = /^\d{4}-\d{2}-\d{2}(\.[\w-]+)?$/;
 
 export const paths = (data: string) => ({ raw: `${data}/raw`, db: `${data}/commonplace.db` });
 
@@ -81,7 +81,8 @@ const merge = <T extends Sourced<{ readonly extra: Extra }>>(held: T | undefined
   };
 };
 
-const message = (error: unknown): string => (error instanceof Error ? error.message : String(error));
+export const errorMessage = (error: unknown): string =>
+  error instanceof Error ? error.message : String(error);
 
 /** All of a snapshot's rows, or why it failed. Never half a snapshot. */
 const load = async (source: Source, snapshot: Snapshot): Promise<Array<Row> | string> => {
@@ -98,7 +99,7 @@ const load = async (source: Source, snapshot: Snapshot): Promise<Array<Row> | st
       rows.push(row);
     }
   } catch (error) {
-    return `row ${rows.length + 1}: ${message(error)}`;
+    return `row ${rows.length + 1}: ${errorMessage(error)}`;
   }
 
   return rows;
