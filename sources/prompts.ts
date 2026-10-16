@@ -223,7 +223,9 @@ async function* codex(since: string | null): AsyncGenerator<Prompt> {
 
 /** Pi: your turns in every session. */
 async function* pi(since: string | null): AsyncGenerator<Prompt> {
-  for (const file of await touched(`${homedir()}/.pi/agent/sessions`, "*/*.jsonl", since)) {
+  const home = process.env["PI_CODING_AGENT_DIR"] ?? `${homedir()}/.pi/agent`;
+
+  for (const file of await touched(`${home}/sessions`, "*/*.jsonl", since)) {
     const entries = (await Array.fromAsync(lines(file))).map(parse);
     const session = entries.find((e) => e?.["type"] === "session");
     const replies = entries.map((e) =>

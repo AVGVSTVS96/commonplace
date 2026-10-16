@@ -332,18 +332,26 @@ test("prompts: typed turns and chat messages, not the harness, plugins or script
     HOME: process.env["HOME"],
     CLAUDE_CONFIG_DIR: process.env["CLAUDE_CONFIG_DIR"],
     CODEX_HOME: process.env["CODEX_HOME"],
+    PI_CODING_AGENT_DIR: process.env["PI_CODING_AGENT_DIR"],
   };
   Object.assign(process.env, {
     HOME: home,
     CLAUDE_CONFIG_DIR: `${home}/.claude`,
     CODEX_HOME: `${home}/.codex`,
+    PI_CODING_AGENT_DIR: `${home}/.pi/agent`,
   });
   const source = prompts();
   const dir = folder({});
   try {
     await source.fetch?.({ dir, since: null, state: folder({}) });
   } finally {
-    Object.assign(process.env, saved);
+    for (const [key, value] of Object.entries(saved)) {
+      if (value === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = value;
+      }
+    }
   }
 
   const rows = await rowsOf(source, dir);
