@@ -1,54 +1,44 @@
 ---
 name: add-source
-description: Add a new data source to the user's commonplace archive (an app, service, export, or local file they want their agents to remember). Use when the user asks to add, connect, import, or sync a source like bookmarks, a chat app, notes, browser history, or a data export into commonplace.
+description: Add a data source to the user's commonplace archive (an app, service, export or local file). Use when the user asks to add, connect, import or sync something like bookmarks, chats, notes, browser history or an export into commonplace.
 ---
 
 # Add a source to commonplace
 
-A source is one file, `sources/<name>.ts`, in the user's commonplace repo (`commonplace root` prints where it is). It has two halves:
+A source is one file, `sources/<name>.ts`, in the user's commonplace repo (`commonplace root`), with two halves:
 
-- `fetch` copies what the service gives into today's snapshot directory. It may use the network, CLIs, and the clock.
-- `rows` turns one snapshot into things, events, and links. It is pure: it reads only the snapshot.
+- `fetch` copies what the service gives into today's snapshot directory.
+- `rows` turns one snapshot into things, events and links, reading nothing else. Snapshots are kept forever, so a fixed `rows` rebuilds all of history.
 
-Snapshots are dated, read-only, and kept forever, so `rows` can be fixed later and the archive rebuilt from them.
+Check `sources/` first. X is built in, with no API key. When the user wants it, confirm once, then:
 
-## Built-in sources first
-
-Check `sources/` before writing one. X (bookmarks with folders, likes, posts, replies) is built in, with no API key. When the user wants their X data, confirm once, then:
-
-1. `npm i -g agent-browser && agent-browser install`, if `agent-browser` isn't installed.
-2. `agent-browser --session x --restore --headed open https://x.com/login`: the user signs in and closes the window.
-3. Add `x()` from `sources/x.ts` to `sources` in `commonplace.config.ts`, and run `commonplace sync`.
+1. If `agent-browser` is missing: `npm i -g agent-browser && agent-browser install`.
+2. `agent-browser --session x --restore --headed open https://x.com/login`. The user signs in and closes the window.
+3. Add `x()` to `sources` in `commonplace.config.ts` and run `commonplace sync`.
 
 ## Steps
 
-1. **Find the data.** Ask the user only what you can't discover: which account, which export. Prefer, in order: an official CLI or API the user is already signed into, a local database or file the app keeps, a data export they download by hand. For a one-time export, skip `fetch`: copy the export into `data/raw/<name>/<YYYY-MM-DD>/` and write only `rows`.
-
-   For a site with no usable API or automatable export (Instagram, LinkedIn, TikTok), use the user's own browser session: see "Sites without an API" below.
-
-2. **Write `fetch`.** Save the service's own output as close to raw as you can (JSON, JSONL, CSV) under `dir`. Don't reshape it; `rows` does that. Use `since` (the last snapshot's date, or null) to take only what's new when the full history is large. Overlapping a day is free: rows with the same ID merge. Throw on failure; the partial snapshot is discarded and retried on the next sync.
-
-3. **Write `rows`.** Read with `json`, `jsonl`, `lines` or `csv` from `src/source.ts`; build rows with `thing`, `event`, `link`, `iso`, `urlRef` from `src/schema.ts`.
-   - **IDs come from content**, so every source names the same thing the same way: `urlRef()` for any link (a post, video, repo or pull request when it is one, else `url:<host/path>`), `gh:repo:owner/name`, `<service>:<kind>:<native id>`. Never a row number or a random ID. A repeatable event with no ID of its own gets `key: digest(...its fields)`.
-   - **Verbs say what the user did**, not what the app calls it. Use one from `src/schema.ts` (`saved`, `liked`, `posted`, `opened`, `followed`, `sent`, `received`, `prompted`, `commented`, `visited`, …). Add a verb there only when none fits.
-   - **Times are real or null.** `iso()` the source's own timestamp; never use the fetch time or guess.
-   - Every event's thing must be emitted by some source, or the build drops the event. A link may point at a thing nobody defined, like the post a reply answers.
-   - Put the app's folder, list, or tag names in the event's `collections`.
-   - If a local file changes whenever there's something new (an app's database), list it in `watch` so the LaunchAgent syncs on it, then run `commonplace install` again to pick it up.
-
-4. **Register it** in `commonplace.config.ts`: add it to `sources` (earlier sources win when two disagree on a field), and add its name to `mcp` only if the user wants MCP clients to read it. Ask before exposing anything personal like messages, mail, or health data. Suggest `redact` rules for anything they'd rather keep out entirely.
-
-5. **Run it**: `commonplace sync`, then read the coverage report. A failed snapshot names the file and row. Check a few records with `commonplace search` and `commonplace show <id>`, then `bun run check`.
+1. **Find the data.** Ask only what you can't discover. Prefer an official CLI or API the user is signed into, then a file or database the app keeps, then an export they download. No API or export you can automate (Instagram, LinkedIn): see [Sites without an API](#sites-without-an-api). A one-time export needs no `fetch`: copy it into `data/raw/<name>/<YYYY-MM-DD>/`.
+2. **Write `fetch`.** Save the service's output (JSON, JSONL, CSV) into `dir` as it came; reshaping is `rows`' job. For a long history, use `since` (the last snapshot's date) to take only what's new; overlap is free, as rows with the same ID merge. Throw on failure and the next sync retries.
+3. **Write `rows`** with the readers in `src/source.ts` and the builders in `src/schema.ts`.
+   - **IDs come from content**, so every source names a thing the same way: `urlRef()` for any link, `gh:repo:owner/name`, `<service>:<kind>:<native id>`. Never a row number or a random ID. A repeatable event with no ID of its own gets `key: digest(...its fields)`.
+   - **Verbs say what the user did**, not what the app calls it, from `src/schema.ts`. Add one only when none fits.
+   - **Times are real or null**: `iso()` the source's own timestamp, never the fetch time or a guess.
+   - An event's thing must come from some source, or the event is dropped. A link may point at a thing no source defines.
+   - Folder, list and tag names go in the event's `collections`.
+   - A local file that changes when there's something new (an app's database) goes in `watch`; then rerun `commonplace install`.
+4. **Register it**: add it to `sources` in `commonplace.config.ts`, where earlier sources win a field when two disagree. Add it to `mcp` only if the user wants MCP clients to read it, and ask first for messages, mail, health and the like. Suggest `redact` rules for anything they'd keep out.
+5. **Run it**: `commonplace sync`, and read the report; a failed snapshot names its file and row. Spot-check with `commonplace search` and `commonplace show <id>`, then run `bun run check`.
 
 ## Sites without an API
 
-Read the site the way its own web app does, from the user's signed-in browser on their machine, with [agent-browser](https://github.com/vercel-labs/agent-browser). `sources/x.ts` is the model to copy:
+Read them the way their own web app does, from the user's signed-in [agent-browser](https://github.com/vercel-labs/agent-browser) session on their machine. Copy `sources/x.ts`:
 
-- **Sign in once.** Confirm with the user, then run `agent-browser --session <site> --restore --headed open <login page>` and let them sign in. The session persists; when the site signs it out, `fetch` throws with that same command.
-- **Call the app's own JSON endpoints from inside the page** (`agent-browser --session <site> --restore eval`), so requests carry the session's cookies. Save each response as it came, one per line.
-- **Look up what the app sends each run** from its current JS bundles (operation IDs, feature flags, tokens), so the fetch never goes stale.
-- **Take only what's new.** Keep the newest few IDs in `state` and stop paging at one the last run had.
-- **Wait out rate limits** (`retry-after`, `x-rate-limit-reset`) instead of failing, and use Chrome's user agent without "Headless", since sites turn away HeadlessChrome.
+- **Sign in once**, after asking: `agent-browser --session <site> --restore --headed open <login page>`. When the session expires, `fetch` throws with that command.
+- **Call the app's JSON endpoints from inside the page** (`agent-browser --session <site> --restore eval`), so its cookies go along. Save each response as it came, one per line.
+- **Read operation IDs, flags and tokens from the app's current bundles** every run.
+- **Stop paging at an ID the last run kept** in `state`.
+- **Wait out rate limits**, and drop "Headless" from the user agent.
 
 ## Example
 

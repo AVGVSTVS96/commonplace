@@ -6,7 +6,7 @@ const tools = [
   {
     name: "search",
     description:
-      'Full-text search across everything the user has made, saved, and said (SQLite FTS5: words, "exact phrases", prefix*, OR, NOT). It matches words and their forms (trip finds trips), not meanings, so when results are thin, try synonyms and related words. Returns citable ids; pass one to show for the whole record.',
+      'Full-text search over everything the user has made, saved and said (SQLite FTS5: words, "exact phrases", prefix*, OR, NOT). Matches word forms (trip finds trips), not meanings, so try synonyms when results are thin. Returns citable ids; pass one to show for the whole record.',
     inputSchema: {
       type: "object",
       properties: {
@@ -39,7 +39,7 @@ const tools = [
   {
     name: "stats",
     description:
-      "What the archive holds and how fresh it is: each source's latest snapshot date and counts, plus every kind and verb in use. Call this first to learn what you can ask for.",
+      "What the archive holds and how fresh it is: each source's latest snapshot and counts, and every kind and verb in use. Call it first to learn what to ask for.",
     inputSchema: { type: "object", properties: {} },
   },
 ] as const;

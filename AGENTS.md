@@ -1,31 +1,31 @@
 # commonplace
 
-A personal data archive: dated snapshots in `data/raw/` → one importer per source → `data/commonplace.db`, read through the `commonplace` CLI and MCP server. See README.md.
+A personal data archive: dated snapshots in `data/raw/`, replayed into `data/commonplace.db`, read through the `commonplace` CLI and MCP server. README.md has the rest.
 
 ## Check
 
 ```sh
-bun run check   # typecheck + lint + format + tests; must pass
+bun run check   # typecheck, lint, format, tests; must pass
 bun run fix     # autofix lint and format
 ```
 
-## Where things go
+## Map
 
 ```
-src/schema.ts           things, events, links; verbs; thing() event() link() iso() urlRef() digest()
-src/source.ts           defineSource, Snapshot, read helpers (json, jsonl, lines, csv)
+src/schema.ts           things, events, links, verbs; thing() event() link() iso() urlRef() digest()
+src/source.ts           defineSource and the readers: json, jsonl, lines, csv
 src/build.ts            replays every snapshot into the database; the only writer
-src/store.ts            every read query, filtered by which sources the reader may see
-src/sync.ts             daily snapshots on demand, then the build
-src/install.ts          macOS LaunchAgent that runs sync on real events
-src/mcp.ts, src/cli.ts  the two doors; both go through store.ts
-sources/<name>.ts       one file per source: fetch + rows
+src/store.ts            every read, filtered by the sources the reader may see
+src/sync.ts             today's snapshots, then a build if anything is new
+src/install.ts          the macOS LaunchAgent, and the fixed binary (src/launcher.ts) it runs
+src/cli.ts, src/mcp.ts  the two doors, both through store.ts
+sources/<name>.ts       one file per source: fetch and rows
 commonplace.config.ts   which sources, their rank, MCP exposure, redaction
 ```
 
 ## Rules
 
-- `data/` is the user's private data. Never commit it, and never edit or delete anything in `data/raw/`.
-- Agents read the archive only through the CLI or MCP, never the database file.
+- `data/` is the user's private data: never commit it, and never edit or delete anything in `data/raw/`.
+- Read the archive only through the CLI or MCP, never the database file.
 - To add a source, follow `skills/add-source/SKILL.md`.
-- Public copy, examples and defaults are written for anyone who copies the template, not from the maintainer's own setup: every browser, every mail provider, live services only.
+- Public copy, examples and defaults are for anyone who copies the template, not the maintainer's setup: every browser, every mail provider, live services only.
