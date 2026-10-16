@@ -18,6 +18,8 @@ export const repeatVerbs = [
   "watched",
   "searched",
   "visited",
+  "viewed",
+  "navigated",
 ] as const;
 
 export type Verb = (typeof onceVerbs)[number] | (typeof repeatVerbs)[number];
@@ -26,7 +28,7 @@ export const verbs: ReadonlyArray<string> = [...onceVerbs, ...repeatVerbs];
 
 export const isOnce = (verb: Verb): boolean => (onceVerbs as ReadonlyArray<string>).includes(verb);
 
-export const rels = ["part_of", "replies_to", "quotes", "mentions"] as const;
+export const rels = ["part_of", "replies_to", "quotes", "reposts", "mentions"] as const;
 
 export type Rel = (typeof rels)[number];
 
@@ -101,15 +103,75 @@ export const iso = (value: string | number | null | undefined): string | null =>
   return Number.isNaN(date.getTime()) ? null : date.toISOString();
 };
 
-/** `url:<host><path>`: one ID per page, whichever source saw it. */
-export const urlId = (href: string): string => {
-  const url = new URL(href);
-  const host = url.hostname.toLowerCase().replace(/^www\./, "");
-  const query = [...url.searchParams].filter(([key]) => !key.startsWith("utm_"));
+export interface Ref {
+  readonly id: string;
+  readonly kind: string;
+}
+
+const web = (href: string): URL | null => {
+  const url = URL.parse(href.trim());
+
+  return url?.protocol === "http:" || url?.protocol === "https:" ? url : null;
+};
+
+const bareHost = (url: URL): string => url.hostname.toLowerCase().replace(/^www\./, "");
+
+const tweetHosts = new Set(["x.com", "twitter.com", "mobile.x.com", "mobile.twitter.com"]);
+const youtubeHosts = new Set(["youtube.com", "m.youtube.com"]);
+const numeric = /^\d+$/;
+
+/**
+ * What a link points at, named the same whichever source saw it: a post, video, repo or pull request
+ * when it is one, else the page, `url:<host><path>` without `www.`, tracking parameters, a fragment or a
+ * trailing slash. Google's `/url?q=` redirect is followed first. Null for anything but an http(s) URL.
+ */
+export const urlRef = (href: string): Ref | null => {
+  const found = web(href);
+
+  if (found === null) {
+    return null;
+  }
+
+  const url =
+    bareHost(found) === "google.com" && found.pathname === "/url"
+      ? (web(found.searchParams.get("q") ?? "") ?? found)
+      : found;
+  const host = bareHost(url);
+  const [first, second, third, fourth] = url.pathname.split("/").filter((part) => part !== "");
+  const watched = url.searchParams.get("v");
+
+  if (tweetHosts.has(host) && second === "status" && numeric.test(third ?? "")) {
+    return { id: `x:tweet:${third}`, kind: "tweet" };
+  }
+  if (host === "youtu.be" && first !== undefined) {
+    return { id: `yt:video:${first}`, kind: "video" };
+  }
+  if (youtubeHosts.has(host) && first === "watch" && watched !== null && watched !== "") {
+    return { id: `yt:video:${watched}`, kind: "video" };
+  }
+  if (youtubeHosts.has(host) && first === "shorts" && second !== undefined) {
+    return { id: `yt:video:${second}`, kind: "video" };
+  }
+  if (host === "github.com" && first !== undefined && second !== undefined) {
+    const repo = `${first}/${second}`.toLowerCase();
+
+    if (third === "pull" && numeric.test(fourth ?? "")) {
+      return { id: `gh:pr:${repo}#${Number(fourth)}`, kind: "pr" };
+    }
+    if (third === undefined) {
+      return { id: `gh:repo:${repo}`, kind: "repo" };
+    }
+  }
+
+  const query = [...url.searchParams].filter(([key]) => !key.startsWith("utm_") && key !== "s");
   const search = query.length > 0 ? `?${new URLSearchParams(query).toString()}` : "";
 
-  return `url:${host}${url.pathname.replace(/\/+$/, "")}${search}`;
+  return { id: `url:${host}${url.pathname.replace(/\/+$/, "")}${search}`, kind: "url" };
 };
+
+/** `sha1` of the fields joined with `|`, null as empty: an ID for a record with no ID of its own. */
+export const digest = (...fields: ReadonlyArray<string | null>): string =>
+  new Bun.CryptoHasher("sha1").update(fields.map((field) => field ?? "").join("|")).digest("hex");
 
 const idPattern = /^[a-z][\w-]*(:[\w-]+)*:\S/;
 const isoPattern = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;

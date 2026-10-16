@@ -1,11 +1,13 @@
 import { Database } from "bun:sqlite";
 import { existsSync, readdirSync, renameSync, rmSync } from "node:fs";
+import { basename } from "node:path";
 
 import type { Config } from "./config.ts";
 import { type Event, type Extra, isOnce, type Link, problem, type Row, type Thing } from "./schema.ts";
 import type { Snapshot, Source } from "./source.ts";
 
-export const datePattern = /^\d{4}-\d{2}-\d{2}$/;
+/** `<YYYY-MM-DD>`, or `<YYYY-MM-DD>.<label>` for a second snapshot of one day, like an archive merged in from elsewhere. */
+export const datePattern = /^\d{4}-\d{2}-\d{2}(\.[\w-]+)?$/;
 
 export const paths = (data: string) => ({ raw: `${data}/raw`, db: `${data}/commonplace.db` });
 
@@ -17,7 +19,7 @@ export const snapshotsOf = (raw: string, source: string): Array<Snapshot> => {
     ? readdirSync(dir)
         .filter((name) => datePattern.test(name))
         .toSorted()
-        .map((date) => ({ source, date, dir: `${dir}/${date}` }))
+        .map((name) => ({ source, date: name.slice(0, 10), dir: `${dir}/${name}` }))
     : [];
 };
 
@@ -26,6 +28,7 @@ type Stored = Sourced<Omit<Event, "key"> & { readonly id: string }>;
 
 export interface Outcome {
   readonly source: string;
+  readonly snapshot: string;
   readonly date: string;
   readonly things: number;
   readonly events: number;
@@ -57,7 +60,7 @@ const union = (a: ReadonlyArray<string>, b: ReadonlyArray<string>): Array<string
 const present = (extra: Extra): Extra =>
   Object.fromEntries(Object.entries(extra).filter(([, v]) => v !== null));
 
-/** Fields the newcomer has replace the held ones; nulls never erase. */
+/** Fields the newcomer has replace the held ones; nulls never erase, but do fill a key the held row lacks. */
 const merge = <T extends Sourced<{ readonly extra: Extra }>>(held: T | undefined, offered: T): T => {
   if (held === undefined) {
     return offered;
@@ -74,7 +77,7 @@ const merge = <T extends Sourced<{ readonly extra: Extra }>>(held: T | undefined
   return {
     ...(next as T),
     sources: union(held.sources, offered.sources),
-    extra: { ...held.extra, ...present(offered.extra) },
+    extra: { ...offered.extra, ...held.extra, ...present(offered.extra) },
   };
 };
 
@@ -115,10 +118,11 @@ const schema = `
     PRIMARY KEY (from_id, rel, to_id)
   ) WITHOUT ROWID;
   CREATE TABLE snapshots (
-    source TEXT NOT NULL, date TEXT NOT NULL, things INTEGER NOT NULL, events INTEGER NOT NULL,
-    links INTEGER NOT NULL, redacted INTEGER NOT NULL, error TEXT, PRIMARY KEY (source, date)
+    source TEXT NOT NULL, snapshot TEXT NOT NULL, date TEXT NOT NULL, things INTEGER NOT NULL,
+    events INTEGER NOT NULL, links INTEGER NOT NULL, redacted INTEGER NOT NULL, error TEXT,
+    PRIMARY KEY (source, snapshot)
   );
-  CREATE VIRTUAL TABLE search USING fts5(id UNINDEXED, tbl UNINDEXED, title, text);
+  CREATE VIRTUAL TABLE search USING fts5(id UNINDEXED, tbl UNINDEXED, title, text, url, tokenize = 'porter unicode61');
 `;
 
 const indexes = `
@@ -127,8 +131,8 @@ const indexes = `
   CREATE INDEX events_verb ON events (verb);
   CREATE INDEX events_ts ON events (ts);
   CREATE INDEX links_to ON links (to_id);
-  INSERT INTO search SELECT id, 'things', title, text FROM things WHERE coalesce(title, text) IS NOT NULL;
-  INSERT INTO search SELECT id, 'events', NULL, text FROM events WHERE text IS NOT NULL;
+  INSERT INTO search SELECT id, 'things', title, text, url FROM things WHERE coalesce(title, text, url) IS NOT NULL;
+  INSERT INTO search SELECT id, 'events', NULL, text, NULL FROM events WHERE text IS NOT NULL;
 `;
 
 interface Corpus {
@@ -152,7 +156,7 @@ const write = (file: string, corpus: Corpus): void => {
     const thing = db.prepare("INSERT INTO things VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)");
     const event = db.prepare("INSERT INTO events VALUES (?, ?, ?, ?, ?, ?, ?, ?)");
     const link = db.prepare("INSERT INTO links VALUES (?, ?, ?, ?)");
-    const snapshot = db.prepare("INSERT INTO snapshots VALUES (?, ?, ?, ?, ?, ?, ?)");
+    const snapshot = db.prepare("INSERT INTO snapshots VALUES (?, ?, ?, ?, ?, ?, ?, ?)");
 
     for (const t of corpus.things) {
       thing.run(t.id, t.kind, t.title, t.text, t.url, t.author, t.created_at, json(t.sources), json(t.extra));
@@ -164,7 +168,7 @@ const write = (file: string, corpus: Corpus): void => {
       link.run(l.from, l.rel, l.to, json(l.sources));
     }
     for (const o of corpus.outcomes) {
-      snapshot.run(o.source, o.date, o.things, o.events, o.links, o.redacted, o.error);
+      snapshot.run(o.source, o.snapshot, o.date, o.things, o.events, o.links, o.redacted, o.error);
     }
   })();
   db.exec(indexes);
@@ -221,6 +225,7 @@ export const build = async (config: Config, data: string): Promise<Built> => {
 
       outcomes.push({
         source: source.name,
+        snapshot: basename(snapshot.dir),
         date: snapshot.date,
         ...counts,
         error: typeof rows === "string" ? `${snapshot.dir}: ${rows}` : null,
@@ -235,13 +240,13 @@ export const build = async (config: Config, data: string): Promise<Built> => {
   });
   const kept = {
     events: [...events.values()].filter((e) => things.has(e.thing)).map(ranked),
-    links: [...links.values()].filter((l) => things.has(l.from) && things.has(l.to)).map(ranked),
+    links: [...links.values()].filter((l) => things.has(l.from)).map(ranked),
   };
 
   write(db, {
     things: [...things.values()].map(ranked),
     ...kept,
-    outcomes: outcomes.toSorted((a, b) => byRank(a.source, b.source) || a.date.localeCompare(b.date)),
+    outcomes: outcomes.toSorted((a, b) => byRank(a.source, b.source) || a.snapshot.localeCompare(b.snapshot)),
   });
 
   return {
@@ -256,7 +261,7 @@ export const build = async (config: Config, data: string): Promise<Built> => {
 const n = (value: number): string => value.toLocaleString("en-US");
 
 const cell = (cells: ReadonlyArray<string>): string =>
-  cells.map((c, i) => (i < 2 ? c.padEnd(14) : c.padStart(9))).join("");
+  cells.map((c, i) => (i < 2 ? c.padEnd(18) : c.padStart(9))).join("");
 
 /** The coverage report: what each snapshot gave, what the archive holds, and what failed. */
 export const report = (built: Built): string => {
@@ -266,13 +271,13 @@ export const report = (built: Built): string => {
     cell(["source", "snapshot", "things", "events", "links", "redacted"]),
     ...built.outcomes.map((o) =>
       o.error === null
-        ? cell([o.source, o.date, n(o.things), n(o.events), n(o.links), n(o.redacted)])
-        : `${cell([o.source, o.date])}  failed`,
+        ? cell([o.source, o.snapshot, n(o.things), n(o.events), n(o.links), n(o.redacted)])
+        : `${cell([o.source, o.snapshot])}  failed`,
     ),
     "",
     `commonplace.db  ${n(built.things)} things · ${n(built.events)} events · ${n(built.links)} links`,
     ...(built.orphans > 0
-      ? [`  dropped ${n(built.orphans)} events/links whose thing no source defined`]
+      ? [`  dropped ${n(built.orphans)} events/links from a thing no source defined`]
       : []),
     ...(failed.length > 0
       ? [`${failed.length} snapshot(s) failed and were skipped:`, ...failed.map((o) => `  ${o.error}`)]

@@ -6,7 +6,7 @@ const tools = [
   {
     name: "search",
     description:
-      'Full-text search across everything the user has made, saved, and said (SQLite FTS5: words, "exact phrases", prefix*, OR, NOT). Returns citable ids; pass one to show for the whole record.',
+      'Full-text search across everything the user has made, saved, and said (SQLite FTS5: words, "exact phrases", prefix*, OR, NOT). It matches words and their forms (trip finds trips), not meanings, so when results are thin, try synonyms and related words. Returns citable ids; pass one to show for the whole record.',
     inputSchema: {
       type: "object",
       properties: {

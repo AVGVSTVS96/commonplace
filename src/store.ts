@@ -98,8 +98,8 @@ export const open = (file: string, sources: ReadonlyArray<string>) => {
     { rel: string; direction: string; id: string; title: string | null },
     { allowed: string; id: string }
   >(`
-    SELECT l.rel, 'to' AS direction, t.id, t.title FROM links l JOIN things t ON t.id = l.to_id
-      WHERE l.from_id = $id AND ${visible("l.sources")} AND ${visible("t.sources")}
+    SELECT l.rel, 'to' AS direction, l.to_id AS id, t.title FROM links l LEFT JOIN things t ON t.id = l.to_id
+      WHERE l.from_id = $id AND ${visible("l.sources")} AND (t.id IS NULL OR ${visible("t.sources")})
     UNION ALL
     SELECT l.rel, 'from' AS direction, t.id, t.title FROM links l JOIN things t ON t.id = l.from_id
       WHERE l.to_id = $id AND ${visible("l.sources")} AND ${visible("t.sources")}

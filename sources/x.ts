@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 
 import { type Computer, local, type Provider, site } from "../src/computer.ts";
-import { event, iso, link, type Row, thing, urlId } from "../src/schema.ts";
+import { event, iso, link, type Row, thing, urlRef } from "../src/schema.ts";
 import { defineSource, json, lines } from "../src/source.ts";
 
 interface User {
@@ -177,10 +177,10 @@ const extraOf = (tweet: Tweet, author: User | undefined) => ({
   metrics: {
     likes: tweet.legacy?.favorite_count ?? null,
     replies: tweet.legacy?.reply_count ?? null,
-    reposts: tweet.legacy?.retweet_count ?? null,
+    retweets: tweet.legacy?.retweet_count ?? null,
     quotes: tweet.legacy?.quote_count ?? null,
     bookmarks: tweet.legacy?.bookmark_count ?? null,
-    views: tweet.views?.count === undefined ? null : Number(tweet.views.count),
+    impressions: tweet.views?.count === undefined ? null : Number(tweet.views.count),
   },
 });
 
@@ -201,18 +201,32 @@ function* postRows(tweet: Tweet): Generator<Row> {
     extra: extraOf(tweet, author),
   });
 
+  const original = unwrap(tweet.legacy?.retweeted_status_result?.result);
+  const related = new Set([id]);
+
   if (tweet.legacy?.in_reply_to_status_id_str !== undefined) {
+    related.add(`x:tweet:${tweet.legacy.in_reply_to_status_id_str}`);
     yield link(id, "replies_to", `x:tweet:${tweet.legacy.in_reply_to_status_id_str}`);
   }
-  if (quoted?.rest_id !== undefined) {
-    yield* postRows(quoted);
-    yield link(id, "quotes", `x:tweet:${quoted.rest_id}`);
+  for (const [rel, other] of [
+    ["quotes", quoted],
+    ["reposts", original],
+  ] as const) {
+    if (other?.rest_id !== undefined) {
+      related.add(`x:tweet:${other.rest_id}`);
+      yield* postRows(other);
+      yield link(id, rel, `x:tweet:${other.rest_id}`);
+    }
   }
   for (const url of [...(note?.entity_set?.urls ?? []), ...(tweet.legacy?.entities?.urls ?? [])]) {
     const href = url.expanded_url ?? url.url;
-    if (!/^https?:\/\/(?:www\.)?(?:x|twitter)\.com\//.test(href)) {
-      yield thing({ id: urlId(href), kind: "url", url: href });
-      yield link(id, "mentions", urlId(href));
+    const target = urlRef(href);
+
+    if (target !== null && !related.has(target.id)) {
+      if (target.kind !== "tweet") {
+        yield thing({ ...target, url: href });
+      }
+      yield link(id, "mentions", target.id);
     }
   }
 }
@@ -281,9 +295,8 @@ export const x = ({ computer = local(), every = 3 }: XOptions = {}) => {
             for (const tweet of tweetsOf(entry)) {
               const id = `x:tweet:${tweet.rest_id}`;
               const mine = tweet.core?.user_results?.result?.rest_id === viewer.id;
-              const repost = tweet.legacy?.retweeted_status_result !== undefined;
 
-              if ((file === "posts" || file === "replies") && (!mine || repost)) {
+              if ((file === "posts" || file === "replies") && !mine) {
                 continue;
               }
               yield* postRows(tweet);
