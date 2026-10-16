@@ -24,7 +24,7 @@ commonplace      CLI ── search · timeline · show · stats
      └── mcp     Claude Code, Codex, Claude Desktop, any MCP client
 ```
 
-It's a template you own, not an app you install: about 1,700 lines of TypeScript plus one file per source, no runtime dependencies (Bun and its built-in SQLite), in your own repo next to your own data. Read it in an afternoon. Change anything.
+It's a template you own, not an app you install: about 1,300 lines of TypeScript plus one file per source, no runtime dependencies (Bun and its built-in SQLite), in your own repo next to your own data. Read it in an afternoon. Change anything.
 
 - **Agents only see what you allow.** Your data lives in `data/`, which never enters git. Agents never open the database: they go through the CLI or MCP server, which only show the sources you list, and `redact` rules keep rows out of the archive entirely.
 - **It keeps itself current.** `commonplace sync` takes one snapshot per source per day and rebuilds. On a Mac, `commonplace install` runs it at login, whenever a message arrives, and whenever an agent session ends.
@@ -35,12 +35,12 @@ It's a template you own, not an app you install: about 1,700 lines of TypeScript
 
 ### Built in
 
-| source     | what                                                                                | needs                                  |
-| ---------- | ----------------------------------------------------------------------------------- | -------------------------------------- |
-| `github`   | your pull requests and issues, your reviews and review comments, stars, and commits | `gh` signed in                         |
-| `prompts`  | every prompt you typed into Claude Code, Codex and Pi, and sent them from chat apps | nothing, read from disk                |
-| `imessage` | every iMessage and SMS conversation                                                 | macOS, Full Disk Access                |
-| `x`        | your bookmarks, likes, posts and replies                                            | a [remote computer](#remote-computers) |
+| source     | what                                                                                | needs                                      |
+| ---------- | ----------------------------------------------------------------------------------- | ------------------------------------------ |
+| `github`   | your pull requests and issues, your reviews and review comments, stars, and commits | `gh` signed in                             |
+| `prompts`  | every prompt you typed into Claude Code, Codex and Pi, and sent them from chat apps | nothing, read from disk                    |
+| `imessage` | every iMessage and SMS conversation                                                 | macOS, Full Disk Access                    |
+| `x`        | your bookmarks with their folders, likes, posts and replies                         | a browser on your machine, [signed in](#x) |
 
 ### From an export
 
@@ -53,6 +53,27 @@ Download it once, unzip it into `data/raw/<source>/<YYYY-MM-DD>/`, and the next 
 | `raindrop`  | bookmarks, collections, tags and highlights                            | Raindrop → Settings → Backups, the CSV            |
 
 Your agents run on more than one machine? `prompts({ ssh: "you@server" })` reads that machine's sessions too, as its own source.
+
+### X
+
+X's archive download is by hand and leaves out bookmarks, and its API is paid. So `x` reads your account the way x.com's own web app does, from a browser on your machine that's signed in as you, through [agent-browser](https://github.com/vercel-labs/agent-browser). It asks for the same pages x.com would show you, keeps them as they came, and takes only what's new since the last sync.
+
+Sign in once, then close the window:
+
+```sh
+npm i -g agent-browser && agent-browser install
+agent-browser --session x --restore --headed open https://x.com/login
+```
+
+Then add it to `sources` in `commonplace.config.ts`:
+
+```ts
+import { x } from "./sources/x.ts";
+
+sources: [github(), prompts(), x()],
+```
+
+If X ever signs the session out, the next sync fails with the same sign-in command.
 
 ### One ask away
 
@@ -72,7 +93,7 @@ You need [Bun](https://bun.sh) and, for the GitHub source, the [GitHub CLI](http
 gh repo create my-commonplace --template AVGVSTVS96/commonplace --private --clone
 cd my-commonplace
 bun install
-bun add -g "$PWD"     # puts `commonplace` on your PATH
+bun add -g "$PWD"     # links `commonplace` into `bun pm bin -g`, which must be on your PATH
 commonplace sync
 commonplace install   # on a Mac: keep it current on its own
 ```
@@ -127,7 +148,7 @@ The MCP server has four tools, `search`, `timeline`, `show` and `stats`, over th
 ```ts
 export default defineConfig({
   // strongest first: when two sources disagree on a field, the earlier one wins
-  sources: [github, prompts, imessage()],
+  sources: [github(), prompts(), imessage()],
 
   // what MCP clients may read; `commonplace mcp --sources github` narrows it per client
   // messages stay local until you add "imessage" here
@@ -139,50 +160,6 @@ export default defineConfig({
 ```
 
 Some sources take options. `imessage({ drop: (message, chat) => … })` keeps matching messages out of the snapshot itself, so they never exist anywhere but Messages.
-
-## Remote computers
-
-Some of what matters most has no API you'd set up and no export you can automate: X, Instagram, LinkedIn, TikTok. For those, commonplace starts a remote computer, a fresh Chrome on a screen of its own, signed in to your account. It opens your own pages the way you would, keeps the data the site's app loads for you, and writes it into your snapshot. Then the computer is destroyed.
-
-```
-commonplace sync ── x is due ──▶ start a computer ──▶ your session in, your pages opened
-     ▲                                                     │
-data/raw/x/<date>/ ◀── the site's own JSON ◀───────────────┘  computer destroyed
-```
-
-- **Your session stays with you.** It lives in `data/state/<source>/`, goes into each computer over an encrypted connection after it starts, and comes back out when the run ends. The computer keeps nothing, and nothing is stored anywhere else.
-- **One computer, at your pace.** Only one runs at a time, it scrolls like a person, and a source catches up every few days rather than all day.
-- **Runs wherever you like.** The computer is a plain container image in [`computer/`](computer/), so it runs in Docker or Podman on your own machine (the default), on [Fly.io](https://fly.io), or anywhere else that runs containers.
-
-Add the source and sign in once:
-
-```ts
-import { x } from "./sources/x.ts";
-
-sources: [github, prompts, x()],
-```
-
-```sh
-commonplace signin x    # prints a link to the computer's screen: sign in there
-```
-
-Your agent can sign in for you instead, on the same screen, with any computer-use tool. The sign-in computer runs Chrome without DevTools attached, because sites turn away sign-ins from a browser under remote control. Once you're in, it saves your session and shuts down.
-
-To run computers on Fly.io instead of your own machine, make an app once and hand its name to the source:
-
-```sh
-fly apps create my-commonplace
-fly ips allocate-v4 --shared -a my-commonplace && fly ips allocate-v6 -a my-commonplace
-export FLY_API_TOKEN=$(fly tokens create deploy -a my-commonplace)
-```
-
-```ts
-import { fly } from "./src/computer.ts";
-
-x({ computer: fly({ app: "my-commonplace", region: "sjc" }) }),
-```
-
-Pick the region nearest you. A run takes a few minutes on a shared 2 CPU machine, which costs well under a cent.
 
 ## How it works
 

@@ -1,6 +1,5 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 
-import { type Computer, local, type Provider, site } from "../src/computer.ts";
 import { event, iso, link, type Row, thing, urlRef } from "../src/schema.ts";
 import { defineSource, json, lines } from "../src/source.ts";
 
@@ -48,6 +47,7 @@ interface Tweet {
 interface Content {
   readonly entryType?: string;
   readonly cursorType?: string;
+  readonly value?: string;
   readonly itemContent?: { readonly tweet_results?: { readonly result?: Tweet } };
   readonly items?: ReadonlyArray<{ readonly item: { readonly itemContent?: Content["itemContent"] } }>;
 }
@@ -60,17 +60,32 @@ interface Entry {
 interface Instruction {
   readonly type: string;
   readonly entries?: ReadonlyArray<Entry>;
+  readonly entry?: Entry;
+}
+
+interface Instructions {
+  readonly timeline?: { readonly instructions?: ReadonlyArray<Instruction> };
 }
 
 interface Timeline {
   readonly data?: {
-    readonly bookmark_timeline_v2?: {
-      readonly timeline?: { readonly instructions?: ReadonlyArray<Instruction> };
-    };
+    readonly bookmark_timeline_v2?: Instructions;
+    readonly bookmark_collection_timeline?: Instructions;
     readonly user?: {
-      readonly result?: {
-        readonly timeline?: { readonly timeline?: { readonly instructions?: ReadonlyArray<Instruction> } };
-        readonly timeline_v2?: { readonly timeline?: { readonly instructions?: ReadonlyArray<Instruction> } };
+      readonly result?: { readonly timeline?: Instructions; readonly timeline_v2?: Instructions };
+    };
+  };
+}
+
+interface Folders {
+  readonly data: {
+    readonly viewer: {
+      readonly user_results: {
+        readonly result: {
+          readonly bookmark_collections_slice: {
+            readonly items: ReadonlyArray<{ readonly id: string; readonly name: string }>;
+          };
+        };
       };
     };
   };
@@ -78,30 +93,24 @@ interface Timeline {
 
 interface Viewer {
   readonly id: string;
-  readonly handle: string;
 }
-
-const timelines = [
-  { file: "bookmarks", operation: "Bookmarks", path: () => "i/bookmarks" },
-  { file: "likes", operation: "Likes", path: (handle: string) => `${handle}/likes` },
-  { file: "posts", operation: "UserOriginalsTimeline", path: (handle: string) => handle },
-  { file: "replies", operation: "UserRepliesTimeline", path: (handle: string) => `${handle}/with_replies` },
-] as const;
 
 /** Posts with reply limits or other visibility rules come wrapped one level deeper. */
 const unwrap = (tweet: Tweet | undefined): Tweet | undefined => tweet?.tweet ?? tweet;
 
-/** New entries only: a pinned post comes in its own instruction, so it never looks like where you left off. */
-const entriesOf = (timeline: Timeline): ReadonlyArray<Entry> => {
-  const root =
+const instructionsOf = (timeline: Timeline): ReadonlyArray<Instruction> =>
+  (
     timeline.data?.bookmark_timeline_v2 ??
+    timeline.data?.bookmark_collection_timeline ??
     timeline.data?.user?.result?.timeline_v2 ??
-    timeline.data?.user?.result?.timeline;
+    timeline.data?.user?.result?.timeline
+  )?.timeline?.instructions ?? [];
 
-  return (root?.timeline?.instructions ?? []).flatMap((instruction) =>
-    instruction.type === "TimelineAddEntries" ? (instruction.entries ?? []) : [],
+/** Every entry of a page, the pinned post's too. */
+const entriesOf = (timeline: Timeline): ReadonlyArray<Entry> =>
+  instructionsOf(timeline).flatMap(
+    (instruction) => instruction.entries ?? (instruction.entry === undefined ? [] : [instruction.entry]),
   );
-};
 
 const tweetsOf = (entry: Entry): ReadonlyArray<Tweet> =>
   (entry.content.items?.map(({ item }) => item.itemContent) ?? [entry.content.itemContent]).flatMap(
@@ -112,63 +121,11 @@ const tweetsOf = (entry: Entry): ReadonlyArray<Tweet> =>
     },
   );
 
+/** The posts a page added: a pinned post comes in its own instruction, so it never looks like where you left off. */
 const idsOf = (timeline: Timeline): ReadonlyArray<string> =>
-  entriesOf(timeline).flatMap((entry) => tweetsOf(entry).map((tweet) => tweet.rest_id ?? ""));
-
-const pause = () => Bun.sleep(700 + Math.random() * 900);
-
-/**
- * Opens one timeline and scrolls it like a person, keeping every response the page loads,
- * until it reaches a post from the last run or the end.
- */
-const scroll = async (computer: Computer, path: string, operation: string, known: ReadonlySet<string>) => {
-  const match = new RegExp(`/i/api/graphql/[\\w-]+/${operation}\\?`);
-  const { responses, stop } = computer.capture(match);
-  const loading = new Set<string>();
-  let asked = 0;
-  let finished = 0;
-  const offs = [
-    computer.on("Network.requestWillBeSent", ({ requestId, request }) => {
-      if (match.test(request.url)) {
-        asked += 1;
-        loading.add(requestId);
-      }
-    }),
-    computer.on("Network.loadingFinished", ({ requestId }) => {
-      finished += loading.delete(requestId) ? 1 : 0;
-    }),
-    computer.on("Network.loadingFailed", ({ requestId }) => {
-      loading.delete(requestId);
-    }),
-  ];
-  const first = computer.next(match);
-  await computer.goto(`https://x.com/${path}`);
-  if (asked === 0) {
-    throw new Error(`x: x.com/${path} loaded without asking for ${operation}, so X has changed the page`);
-  }
-  await first;
-
-  for (let seen = 0; ;) {
-    const fresh = responses.slice(seen);
-    seen = responses.length;
-    const ids = fresh.flatMap((response) => idsOf(JSON.parse(response.body) as Timeline));
-    if (fresh.length > 0 && (ids.length === 0 || ids.some((id) => known.has(id)))) {
-      break;
-    }
-    await computer.wheel(600 + Math.random() * 400);
-    await pause();
-    const bottom = await computer.evaluate<boolean>(
-      "innerHeight + scrollY >= document.documentElement.scrollHeight - 4",
-    );
-    if (bottom && loading.size === 0 && responses.length === finished && responses.length === seen) {
-      break;
-    }
-  }
-  stop();
-  offs.forEach((off) => off());
-
-  return responses.filter((response) => response.status === 200).map((response) => response.body);
-};
+  instructionsOf(timeline)
+    .flatMap((instruction) => (instruction.type === "TimelineAddEntries" ? (instruction.entries ?? []) : []))
+    .flatMap((entry) => tweetsOf(entry).map((tweet) => tweet.rest_id ?? ""));
 
 const extraOf = (tweet: Tweet, author: User | undefined) => ({
   author_name: author?.core?.name ?? author?.legacy?.name ?? null,
@@ -231,66 +188,262 @@ function* postRows(tweet: Tweet): Generator<Row> {
   }
 }
 
-export interface XOptions {
-  /** Where the remote computer runs. Defaults to Docker or Podman on this machine. */
-  readonly computer?: Provider;
-  /** Days between catch-ups. */
-  readonly every?: number;
+interface Operation {
+  readonly queryId: string;
+  readonly features: ReadonlyArray<string>;
+  readonly toggles: ReadonlyArray<string>;
 }
 
-/** Your X bookmarks, likes, posts and replies, read by a remote computer signed in as you. */
-export const x = ({ computer = local(), every = 3 }: XOptions = {}) => {
-  const account = site(computer, {
-    name: "x",
-    login: "https://x.com/i/flow/login",
-    signedIn: (cookies) =>
-      cookies.some((cookie) => cookie.name === "auth_token" && cookie.domain.endsWith("x.com")),
-  });
+const operation =
+  /queryId:"([^"]+)",operationName:"(\w+)",operationType:"\w+",metadata:\{featureSwitches:\[([^\]]*)\],fieldToggles:\[([^\]]*)\]/g;
+const strings = (list: string) => Array.from(list.matchAll(/"([^"]+)"/g), (match) => match[1] ?? "");
+const bundles = "https://abs.twimg.com/responsive-web/client-web/";
+
+/** Every GraphQL operation in x.com's current bundles and the web app's bearer token, so nothing goes stale. */
+const discover = async (html: string) => {
+  const chunks = (pattern: RegExp) =>
+    new Map(Array.from(html.matchAll(pattern), ([, id, value]) => [id, value]));
+  const names = chunks(/(\d+):"((?:bundle|ondemand|loader|shared~|vendor)[^"]*)"/g);
+  const hashes = chunks(/(\d+):"([0-9a-f]{16})"/g);
+  const main = /client-web\/(main\.[0-9a-f]+\.js)/.exec(html)?.[1];
+
+  if (main === undefined) {
+    throw new Error("x: x.com's page names no main bundle, so X has changed how it loads");
+  }
+
+  const queue = Array.from(names, ([id, name]) =>
+    hashes.has(id) ? `${name}.${hashes.get(id)}a.js` : "",
+  ).filter((file) => file !== "");
+  const code = [await (await fetch(bundles + main)).text()];
+  await Promise.all(
+    Array.from({ length: 16 }, async () => {
+      for (let file = queue.shift(); file !== undefined; file = queue.shift()) {
+        code.push(await (await fetch(bundles + file)).text());
+      }
+    }),
+  );
+
+  return {
+    bearer: /AAAAAAAAAAAAAAAAAAAAA[A-Za-z0-9%]+/.exec(code[0] ?? "")?.[0],
+    operations: new Map<string, Operation>(
+      code.flatMap((js) =>
+        Array.from(js.matchAll(operation), ([, queryId = "", name = "", features = "", toggles = ""]) => [
+          name,
+          { queryId, features: strings(features), toggles: strings(toggles) },
+        ]),
+      ),
+    ),
+  };
+};
+
+const agentBrowser = (args: ReadonlyArray<string>, env: Record<string, string | undefined> = process.env) => {
+  const run = Bun.spawnSync(["agent-browser", ...args], { env });
+
+  if (run.exitCode !== 0) {
+    throw new Error(`x: agent-browser ${args.join(" ").slice(0, 80)}: ${run.stderr.toString().trim()}`);
+  }
+
+  return run.stdout.toString();
+};
+
+const evaluate = (
+  session: ReadonlyArray<string>,
+  js: string,
+  env?: Record<string, string | undefined>,
+): any => {
+  const out = JSON.parse(
+    agentBrowser([...session, "eval", "--json", "-b", Buffer.from(js).toString("base64")], env),
+  );
+
+  if (out.success !== true) {
+    throw new Error(`x: ${out.error}`);
+  }
+
+  return out.data.result;
+};
+
+/** Chrome's own user agent without "Headless", which X turns away, read from a throwaway browser. */
+const userAgent = (): string => {
+  const probe = ["--session", "commonplace-user-agent"];
+  agentBrowser([...probe, "open", "about:blank"]);
+
+  try {
+    return String(evaluate(probe, "navigator.userAgent")).replace("HeadlessChrome", "Chrome");
+  } finally {
+    agentBrowser([...probe, "close"]);
+  }
+};
+
+export interface XOptions {
+  /** The agent-browser session that's signed in to X. */
+  readonly session?: string;
+}
+
+/**
+ * Your X bookmarks with their folders, likes, posts and replies, read the way x.com's own web app reads them:
+ * GraphQL requests sent from inside agent-browser's signed-in session on this machine. Each run keeps the pages
+ * as they came and stops at a post the last run already had.
+ */
+export const x = ({ session = "x" }: XOptions = {}) => {
+  const signin = `agent-browser --session ${session} --restore --headed open https://x.com/login`;
 
   return defineSource({
     name: "x",
-    every,
-    signin: account.signin,
 
-    fetch: ({ dir, state }) =>
-      account.run(state, async (browser) => {
-        const twid = (await browser.cookies()).find((cookie) => cookie.name === "twid")?.value ?? "";
-        const id = /u(?:%3D|=)(\d+)/.exec(decodeURIComponent(twid))?.[1];
-        if (id === undefined) {
-          throw new Error("x: the session has no twid cookie");
-        }
-        await browser.goto("https://x.com/home");
-        const handle = await browser.evaluate<string | null>(
-          `document.querySelector('[data-testid="AppTabBar_Profile_Link"]')?.getAttribute("href")?.slice(1) ?? null`,
+    fetch: async ({ dir, since, state }) => {
+      if (Bun.which("agent-browser") === null) {
+        throw new Error("x: needs agent-browser (npm i -g agent-browser && agent-browser install)");
+      }
+
+      const signedIn = ["--session", session, "--restore"];
+      const env = { ...process.env, AGENT_BROWSER_USER_AGENT: userAgent() };
+
+      try {
+        agentBrowser([...signedIn, "open", "https://x.com/i/bookmarks"], env);
+        const { cookie, html } = evaluate(
+          signedIn,
+          "({ cookie: document.cookie, html: document.documentElement.outerHTML })",
+          env,
         );
-        if (handle === null) {
-          throw new Error("x: x.com/home has no Profile link, so the session isn't signed in");
+        const viewer = /(?:^|; )twid=u%3D(\d+)/.exec(cookie)?.[1];
+
+        if (viewer === undefined) {
+          throw new Error(`x: the agent-browser session isn't signed in to X. Sign in once with: ${signin}`);
         }
-        writeFileSync(`${dir}/viewer.json`, JSON.stringify({ id, handle } satisfies Viewer));
+
+        const { bearer, operations } = await discover(html);
+
+        const graphql = async (name: string, variables: Record<string, unknown>): Promise<string> => {
+          const op = operations.get(name);
+
+          if (op === undefined) {
+            throw new Error(`x: x.com's bundles no longer have a ${name} operation`);
+          }
+
+          const params = new URLSearchParams({
+            variables: JSON.stringify(variables),
+            features: JSON.stringify(Object.fromEntries(op.features.map((key) => [key, true]))),
+            fieldToggles: JSON.stringify(Object.fromEntries(op.toggles.map((key) => [key, false]))),
+          });
+          const request = {
+            url: `https://x.com/i/api/graphql/${op.queryId}/${name}?${params.toString()}`,
+            bearer,
+          };
+          const { status, remaining, reset, retryAfter, body } = evaluate(
+            signedIn,
+            `(async ({ url, bearer }) => {
+              const csrf = document.cookie.match(/(?:^|; )ct0=([^;]+)/)?.[1];
+              const res = await fetch(url, { headers: {
+                authorization: "Bearer " + bearer, "x-csrf-token": csrf,
+                "x-twitter-active-user": "yes", "x-twitter-auth-type": "OAuth2Session",
+              } });
+              const header = (name) => Number(res.headers.get(name) ?? NaN);
+              return { status: res.status, remaining: header("x-rate-limit-remaining"),
+                reset: header("x-rate-limit-reset"), retryAfter: header("retry-after"), body: await res.text() };
+            })(${JSON.stringify(request)})`,
+            env,
+          );
+          const until = Number.isFinite(retryAfter) ? Date.now() + retryAfter * 1000 : reset * 1000;
+
+          if (status === 429 && Number.isFinite(until)) {
+            console.error(`x ${name}: rate limited until ${new Date(until).toISOString()}`);
+            await Bun.sleep(until - Date.now());
+
+            return graphql(name, variables);
+          }
+          if (status !== 200) {
+            throw new Error(`x ${name} ${status}: ${body.slice(0, 300)}`);
+          }
+
+          const { errors } = JSON.parse(body);
+
+          if (errors?.length > 0) {
+            throw new Error(`x ${name}: ${JSON.stringify(errors).slice(0, 300)}`);
+          }
+          if (remaining === 0) {
+            console.error(`x ${name}: out of requests until ${new Date(reset * 1000).toISOString()}`);
+            await Bun.sleep(reset * 1000 - Date.now());
+          }
+
+          return body;
+        };
 
         const heads = `${state}/heads.json`;
-        const known: Record<string, ReadonlyArray<string>> = existsSync(heads)
+        const known: Record<string, ReadonlyArray<string>> = since !== null && existsSync(heads)
           ? JSON.parse(readFileSync(heads, "utf8"))
           : {};
         const next: Record<string, ReadonlyArray<string>> = {};
 
-        for (const { file, operation, path } of timelines) {
-          const bodies = await scroll(browser, path(handle), operation, new Set(known[file] ?? []));
-          writeFileSync(`${dir}/${file}.jsonl`, bodies.map((body) => `${body}\n`).join(""));
-          const ids = bodies.flatMap((body) => idsOf(JSON.parse(body) as Timeline));
-          next[file] = ids.length > 0 ? ids.slice(0, 20) : (known[file] ?? []);
-          await pause();
+        /** Follows the Bottom cursor until a page brings nothing new or holds a post the last run had. */
+        const save = async (file: string, name: string, variables: Record<string, unknown>) => {
+          const last = new Set(known[file] ?? []);
+          const pages: Array<string> = [];
+          const seen = new Set<string>();
+
+          for (let cursor: string | undefined; ;) {
+            const page = await graphql(name, { ...variables, cursor });
+            const timeline = JSON.parse(page) as Timeline;
+            const entries = entriesOf(timeline);
+            const fresh = entries.filter(
+              (e) => e.content.entryType !== "TimelineTimelineCursor" && !seen.has(e.entryId),
+            );
+
+            pages.push(page);
+            fresh.forEach((entry) => seen.add(entry.entryId));
+            cursor = entries.find((entry) => entry.content.cursorType === "Bottom")?.content.value;
+
+            if (fresh.length === 0 || cursor === undefined || idsOf(timeline).some((id) => last.has(id))) {
+              break;
+            }
+          }
+
+          const ids = pages.flatMap((page) => idsOf(JSON.parse(page) as Timeline));
+          next[file] = ids.length > 0 ? ids.slice(0, 20) : [...last];
+          writeFileSync(`${dir}/${file}.jsonl`, pages.map((page) => `${page}\n`).join(""));
+        };
+
+        writeFileSync(`${dir}/viewer.json`, JSON.stringify({ id: viewer } satisfies Viewer));
+        await save("bookmarks", "Bookmarks", { count: 100, includePromotedContent: true });
+
+        const folders = await graphql("BookmarkFoldersSlice", {});
+        writeFileSync(`${dir}/folders.json`, folders);
+        mkdirSync(`${dir}/folders`);
+        for (const { id } of (JSON.parse(folders) as Folders).data.viewer.user_results.result
+          .bookmark_collections_slice.items) {
+          await save(`folders/${id}`, "BookmarkFolderTimeline", {
+            bookmark_collection_id: id,
+            includePromotedContent: true,
+          });
         }
+
+        const profile = { userId: viewer, count: 100, includePromotedContent: false, withVoice: true };
+        await save("likes", "Likes", { ...profile, withClientEventToken: false, withBirdwatchNotes: false });
+        await save("posts", "UserTweets", { ...profile, withQuickPromoteEligibilityTweetFields: true });
+        await save("replies", "UserRepliesTimeline", { ...profile, withCommunity: true });
 
         mkdirSync(state, { recursive: true });
         writeFileSync(heads, JSON.stringify(next));
-      }),
+      } finally {
+        agentBrowser([...signedIn, "close"], env);
+      }
+    },
 
     rows: async function* ({ dir }) {
       const viewer = await json<Viewer>(`${dir}/viewer.json`);
+      const folders = existsSync(`${dir}/folders.json`)
+        ? (await json<Folders>(`${dir}/folders.json`)).data.viewer.user_results.result
+            .bookmark_collections_slice.items
+        : [];
+      const files = [
+        { file: "bookmarks", collections: ["x bookmarks"] },
+        ...folders.map(({ id, name }) => ({ file: `folders/${id}`, collections: ["x bookmarks", name] })),
+        { file: "likes", collections: [] },
+        { file: "posts", collections: [] },
+        { file: "replies", collections: [] },
+      ];
 
-      for (const { file } of timelines) {
-        for await (const line of lines(`${dir}/${file}.jsonl`)) {
+      for (const { file, collections } of files) {
+        for await (const line of existsSync(`${dir}/${file}.jsonl`) ? lines(`${dir}/${file}.jsonl`) : []) {
           for (const entry of entriesOf(JSON.parse(line) as Timeline)) {
             for (const tweet of tweetsOf(entry)) {
               const id = `x:tweet:${tweet.rest_id}`;
@@ -300,11 +453,11 @@ export const x = ({ computer = local(), every = 3 }: XOptions = {}) => {
                 continue;
               }
               yield* postRows(tweet);
-              yield file === "bookmarks"
-                ? event({ verb: "saved", thing: id, collections: ["x bookmarks"] })
-                : file === "likes"
-                  ? event({ verb: "liked", thing: id })
-                  : event({ verb: "posted", thing: id, ts: iso(tweet.legacy?.created_at) });
+              yield file === "likes"
+                ? event({ verb: "liked", thing: id })
+                : file === "posts" || file === "replies"
+                  ? event({ verb: "posted", thing: id, ts: iso(tweet.legacy?.created_at) })
+                  : event({ verb: "saved", thing: id, collections });
             }
           }
         }

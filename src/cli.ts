@@ -9,7 +9,7 @@ import { build, paths, report } from "./build.ts";
 import { install } from "./install.ts";
 import { serve } from "./mcp.ts";
 import { type Hit, open } from "./store.ts";
-import { stateOf, sync } from "./sync.ts";
+import { sync } from "./sync.ts";
 
 const usage = `commonplace: your personal data kit for agents
 
@@ -20,7 +20,6 @@ const usage = `commonplace: your personal data kit for agents
   commonplace sync               snapshot every source due today, then rebuild
   commonplace install            sync on its own: at login, on new messages, when a hook kicks it (macOS)
   commonplace build              rebuild the database from data/raw
-  commonplace signin <source>    sign a source in to its account
   commonplace mcp                MCP server on stdio  --sources a,b to narrow what a client sees
   commonplace sql <query>        read-only SQL, local only
   commonplace root               where this commonplace lives
@@ -126,14 +125,6 @@ switch (values.help === true ? "help" : (command ?? "help")) {
   case "install":
     console.log(await install(config, root, data));
     break;
-  case "signin": {
-    const signs = config.sources.filter((s) => s.signin !== undefined);
-    const source =
-      signs.find((s) => s.name === rest[0]) ??
-      fail(`Usage: commonplace signin <source>, one of: ${signs.map((s) => s.name).join(", ") || "none"}`);
-    await source.signin?.({ state: stateOf(data, source.name) });
-    break;
-  }
   case "mcp": {
     const sources = values.sources?.split(",").map((s) => s.trim()) ?? config.mcp;
     await serve(store(sources.filter((s) => config.mcp.includes(s))), pkg.version);

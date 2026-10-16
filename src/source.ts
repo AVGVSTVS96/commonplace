@@ -14,7 +14,7 @@ export interface FetchContext {
   readonly dir: string;
   /** The date of this source's last snapshot, so fetch can take only what's new. Null on the first run. */
   readonly since: string | null;
-  /** A private directory this source keeps between runs, for things like a signed-in session. Never in a snapshot. */
+  /** A private directory this source keeps between runs, like where it left off. Never in a snapshot. */
   readonly state: string;
 }
 
@@ -26,8 +26,6 @@ export interface Source {
   readonly every?: number;
   /** Files whose change means there's something new, for the LaunchAgent `commonplace install` sets up. */
   readonly watch?: ReadonlyArray<string>;
-  /** Gets this source signed in, for `commonplace signin <name>`. */
-  readonly signin?: (context: Pick<FetchContext, "state">) => Promise<void>;
   /** Turns one snapshot into rows. Pure: reads only the snapshot, no clock, no network. */
   readonly rows: (snapshot: Snapshot) => AsyncIterable<Row> | Iterable<Row>;
 }

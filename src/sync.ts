@@ -17,7 +17,7 @@ const today = (): string => new Date().toLocaleDateString("sv");
 
 const days = (from: string, to: string): number => (Date.parse(to) - Date.parse(from)) / 86_400_000;
 
-export const stateOf = (data: string, source: string): string => `${data}/state/${source}`;
+const stateOf = (data: string, source: string): string => `${data}/state/${source}`;
 
 const alive = (pid: number): boolean => {
   try {

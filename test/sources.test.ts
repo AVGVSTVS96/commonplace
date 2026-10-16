@@ -12,6 +12,7 @@ import { prompts } from "../sources/prompts.ts";
 import raindrop from "../sources/raindrop.ts";
 import takeout from "../sources/takeout.ts";
 import xArchive from "../sources/x-archive.ts";
+import { x } from "../sources/x.ts";
 
 const folder = (files: Record<string, string>): string => {
   const dir = mkdtempSync(`${tmpdir()}/commonplace-source-`);
@@ -103,6 +104,69 @@ test("raindrop: a save per bookmark, folders as collections, tweets named as twe
   expect(rows).toContainEqual(
     expect.objectContaining({ verb: "saved", thing: "url:example.com/a", collections: [], text: "my note" }),
   );
+});
+
+const post = (id: string, user: string, text: string, legacy: object = {}) => ({
+  rest_id: id,
+  core: { user_results: { result: { rest_id: user, core: { screen_name: `user${user}` } } } },
+  legacy: { full_text: text, created_at: "Thu Jan 01 12:00:00 +0000 2026", ...legacy },
+});
+
+/** One GraphQL page as x.com sends it: a timeline of posts. */
+const timeline = (...posts: ReadonlyArray<object>) => ({
+  timeline: {
+    instructions: [
+      {
+        type: "TimelineAddEntries",
+        entries: posts.map((result, i) => ({
+          entryId: `tweet-${i}`,
+          content: { itemContent: { tweet_results: { result } } },
+        })),
+      },
+    ],
+  },
+});
+
+const pages = (...data: ReadonlyArray<object>) =>
+  data.map((page) => `${JSON.stringify({ data: page })}\n`).join("");
+
+test("x: bookmarks with their folders, likes, and only your own posts, from the pages x.com sent", async () => {
+  const shared = post("10", "7", "a thread on kerning https://t.co/a", {
+    entities: { urls: [{ url: "https://t.co/a", expanded_url: "https://example.com/kerning" }] },
+  });
+  const profile = (...posts: ReadonlyArray<object>) => ({
+    user: { result: { timeline: timeline(...posts) } },
+  });
+  const dir = folder({
+    "viewer.json": JSON.stringify({ id: "1" }),
+    "bookmarks.jsonl": pages({ bookmark_timeline_v2: timeline(shared) }),
+    "folders.json": pages({
+      viewer: {
+        user_results: { result: { bookmark_collections_slice: { items: [{ id: "55", name: "type" }] } } },
+      },
+    }),
+    "folders/55.jsonl": pages({ bookmark_collection_timeline: timeline(shared) }),
+    "likes.jsonl": pages(profile(post("11", "8", "liked"))),
+    "posts.jsonl": pages(profile(post("12", "1", "mine"), post("13", "9", "someone else's"))),
+  });
+  const rows = await rowsOf(x(), dir);
+
+  expect(pick(rows, "event")).toEqual([
+    expect.objectContaining({ verb: "saved", thing: "x:tweet:10", collections: ["x bookmarks"] }),
+    expect.objectContaining({ verb: "saved", thing: "x:tweet:10", collections: ["x bookmarks", "type"] }),
+    expect.objectContaining({ verb: "liked", thing: "x:tweet:11" }),
+    expect.objectContaining({ verb: "posted", thing: "x:tweet:12", ts: "2026-01-01T12:00:00.000Z" }),
+  ]);
+  expect(rows).toContainEqual(
+    expect.objectContaining({ id: "x:tweet:10", author: "user7", url: "https://x.com/user7/status/10" }),
+  );
+  expect(rows).toContainEqual({
+    type: "link",
+    from: "x:tweet:10",
+    rel: "mentions",
+    to: "url:example.com/kerning",
+  });
+  expect(rows).not.toContainEqual(expect.objectContaining({ id: "x:tweet:13" }));
 });
 
 const js = (name: string, value: unknown) => `window.YTD.${name}.part0 = ${JSON.stringify(value)}`;
