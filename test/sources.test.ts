@@ -1,6 +1,6 @@
 import { Database } from "bun:sqlite";
-import { expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { expect, onTestFinished, test } from "bun:test";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname } from "node:path";
 
@@ -16,6 +16,7 @@ import { x } from "../sources/x.ts";
 
 const folder = (files: Record<string, string>): string => {
   const dir = mkdtempSync(`${tmpdir()}/commonplace-source-`);
+  onTestFinished(() => rmSync(dir, { recursive: true, force: true }));
 
   for (const [path, text] of Object.entries(files)) {
     mkdirSync(dirname(`${dir}/${path}`), { recursive: true });

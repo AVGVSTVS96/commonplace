@@ -1,5 +1,5 @@
-import { expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { expect, onTestFinished, test } from "bun:test";
+import { chmodSync, mkdirSync, mkdtempSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 
 import { build, paths } from "../src/build.ts";
@@ -17,10 +17,20 @@ const snapshot = (data: string, source: string, date: string, rows: ReadonlyArra
   writeFileSync(`${dir}/rows.jsonl`, rows.map((row) => JSON.stringify(row)).join("\n"));
 };
 
+const scratch = () => {
+  const dir = mkdtempSync(`${tmpdir()}/commonplace-`);
+  onTestFinished(() => {
+    for (const path of readdirSync(dir, { encoding: "utf8", recursive: true }))
+      chmodSync(`${dir}/${path}`, 0o700);
+    rmSync(dir, { recursive: true, force: true });
+  });
+  return dir;
+};
+
 const page = urlRef("https://www.Example.com/post/?utm_source=x&id=1#top")?.id ?? "";
 
 const fixture = () => {
-  const data = mkdtempSync(`${tmpdir()}/commonplace-`);
+  const data = scratch();
 
   snapshot(data, "bookmarks", "2026-01-01", [
     thing({ id: page, kind: "url", title: "Old title", text: "from bookmarks" }),
@@ -163,7 +173,7 @@ test("search falls back to plain words when the query isn't FTS5 syntax", async 
 });
 
 test("sync snapshots each source once a day, read-only, and leaves nothing behind on failure", async () => {
-  const data = mkdtempSync(`${tmpdir()}/commonplace-`);
+  const data = scratch();
   let calls = 0;
   const notes = defineSource({
     name: "notes",
@@ -198,7 +208,7 @@ test("sync snapshots each source once a day, read-only, and leaves nothing behin
 });
 
 test("sync rebuilds when a snapshot is dropped in by hand, and only then", async () => {
-  const data = mkdtempSync(`${tmpdir()}/commonplace-`);
+  const data = scratch();
   const only = defineConfig({ sources: [fromFile("export")] });
 
   snapshot(data, "export", "2026-01-01", [thing({ id: "note:1", kind: "note" })]);
@@ -212,7 +222,7 @@ test("sync rebuilds when a snapshot is dropped in by hand, and only then", async
 const daysAgo = (days: number) => new Date(Date.now() - days * 86_400_000).toLocaleDateString("sv");
 
 test("a source with `every` waits that many days, and gets its own state directory", async () => {
-  const data = mkdtempSync(`${tmpdir()}/commonplace-`);
+  const data = scratch();
   const states: Array<string> = [];
   const weekly = defineSource({
     name: "weekly",
@@ -235,7 +245,7 @@ test("a source with `every` waits that many days, and gets its own state directo
 });
 
 test("lines split on newlines only, so JSON text may hold a line separator", async () => {
-  const file = `${mkdtempSync(`${tmpdir()}/commonplace-`)}/rows.jsonl`;
+  const file = `${scratch()}/rows.jsonl`;
   writeFileSync(file, `${JSON.stringify({ text: "one two" })}\r\n\n${JSON.stringify({ text: "three" })}`);
 
   expect(await Array.fromAsync(jsonl<{ text: string }>(file))).toEqual([
