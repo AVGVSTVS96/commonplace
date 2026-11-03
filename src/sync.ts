@@ -13,6 +13,24 @@ import {
 import { build, type Built, errorMessage, paths, snapshotsOf } from "./build.ts";
 import type { Config } from "./config.ts";
 
+/** A fetch still going after this long is stuck: it fails, and the sources after it still run. */
+const FETCH_LIMIT_MS = 30 * 60_000;
+
+const within = async <T>(ms: number, work: Promise<T>): Promise<T> => {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+
+  try {
+    return await Promise.race([
+      work,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`still running after ${ms / 60_000} minutes`)), ms);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+};
+
 const today = (): string => new Date().toLocaleDateString("sv");
 
 const days = (from: string, to: string): number => (Date.parse(to) - Date.parse(from)) / 86_400_000;
@@ -69,7 +87,12 @@ export interface Synced {
  * fetched now or dropped in by hand, is newer than the database.
  * Safe to call from as many hooks as you like: a running sync makes the others return null.
  */
-export const sync = (config: Config, data: string, log: (line: string) => void): Promise<Synced | null> => {
+export const sync = (
+  config: Config,
+  data: string,
+  log: (line: string) => void,
+  limit = FETCH_LIMIT_MS,
+): Promise<Synced | null> => {
   mkdirSync(data, { recursive: true });
 
   return locked(data, async () => {
@@ -95,11 +118,14 @@ export const sync = (config: Config, data: string, log: (line: string) => void):
       log(`fetch ${source.name}`);
 
       try {
-        await source.fetch({
-          dir: partial,
-          since: previous?.date ?? null,
-          state: `${data}/state/${source.name}`,
-        });
+        await within(
+          limit,
+          source.fetch({
+            dir: partial,
+            since: previous?.date ?? null,
+            state: `${data}/state/${source.name}`,
+          }),
+        );
         readOnly(partial);
         renameSync(partial, final);
         fetched.push(source.name);

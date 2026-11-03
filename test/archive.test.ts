@@ -207,6 +207,24 @@ test("sync snapshots each source once a day, read-only, and leaves nothing behin
   expect(readdirSync(`${paths(data).raw}/broken`)).toEqual([]);
 });
 
+test("a fetch that never ends fails at its limit, and the sources after it still run", async () => {
+  const data = scratch();
+  const stuck = defineSource({ name: "stuck", fetch: () => new Promise(() => {}), rows: () => [] });
+  const notes = defineSource({
+    name: "notes",
+    fetch: async ({ dir }) =>
+      writeFileSync(`${dir}/rows.jsonl`, JSON.stringify(thing({ id: "note:1", kind: "note" }))),
+    rows: ({ dir }) => jsonl<Row>(`${dir}/rows.jsonl`),
+  });
+
+  const synced = await sync(defineConfig({ sources: [stuck, notes] }), data, () => {}, 50);
+
+  expect(synced?.fetched).toEqual(["notes"]);
+  expect(synced?.failed).toEqual([
+    { source: "stuck", error: expect.stringContaining("still running after") },
+  ]);
+});
+
 test("sync rebuilds when a snapshot is dropped in by hand, and only then", async () => {
   const data = scratch();
   const only = defineConfig({ sources: [fromFile("export")] });

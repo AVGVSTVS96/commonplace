@@ -112,9 +112,7 @@ switch (values.help === true ? "help" : (command ?? "help")) {
           ? `Nothing new. Failed: ${synced.failed.map((f) => f.source).join(", ")}`
           : "Every source is up to date for today.",
     );
-    process.exitCode =
-      synced.failed.length > 0 || synced.built?.outcomes.some((o) => o.error !== null) ? 1 : 0;
-    break;
+    process.exit(synced.failed.length > 0 || synced.built?.outcomes.some((o) => o.error !== null) ? 1 : 0);
   }
   case "build": {
     const built = await build(config, data);
