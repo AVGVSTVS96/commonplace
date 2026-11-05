@@ -91,6 +91,21 @@ const fields = {
 
 const day = (date: Date) => date.toISOString().slice(0, 10);
 
+/** GitHub search takes 30 requests a minute and refuses the rest, so a refused search waits out the minute and runs again. */
+const search = async (command: () => $.ShellPromise): Promise<string> => {
+  for (let tries = 1; ; tries++) {
+    const result = await command().quiet().nothrow();
+
+    if (result.exitCode === 0) {
+      return result.stdout.toString();
+    }
+    if (tries === 5 || !result.stderr.toString().includes("rate limit")) {
+      throw new Error(result.stderr.toString().trim());
+    }
+    await Bun.sleep(61_000);
+  }
+};
+
 /** GitHub search stops at 1,000 results, so a range that fills up is searched again in halves. */
 const searchAll = async (
   kind: "prs" | "issues",
@@ -98,8 +113,12 @@ const searchAll = async (
   from: Date,
   to: Date,
 ): Promise<Array<Issue>> => {
-  const found =
-    (await $`gh search ${kind} --author ${login} --created ${`${day(from)}..${day(to)}`} --limit 1000 --json ${fields[kind]}`.json()) as Array<Issue>;
+  const found = JSON.parse(
+    await search(
+      () =>
+        $`gh search ${kind} --author ${login} --created ${`${day(from)}..${day(to)}`} --limit 1000 --json ${fields[kind]}`,
+    ),
+  ) as Array<Issue>;
 
   if (found.length < 1000 || day(from) === day(to)) {
     return found;
@@ -203,7 +222,10 @@ export const github = ({
       await $`gh api user/starred --paginate -H ${"Accept: application/vnd.github.star+json"} --jq ${".[] | {starred_at, repo: .repo | {full_name, description, html_url, language, topics, created_at}}"} > ${Bun.file(`${dir}/stars.jsonl`)}`;
 
       const reviewed = (
-        await $`gh api --paginate ${`search/issues?q=reviewed-by:${login}+type:pr&per_page=100`} --jq .items[]`.text()
+        await search(
+          () =>
+            $`gh api --paginate ${`search/issues?q=reviewed-by:${login}+type:pr&per_page=100`} --jq .items[]`,
+        )
       )
         .split("\n")
         .filter((line) => line !== "")
