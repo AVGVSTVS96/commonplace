@@ -22,7 +22,7 @@ export interface Source {
   readonly name: string;
   /** Copies what the service gives you into `dir`, as close to raw as you can. Omit for one-time exports you drop in by hand. */
   readonly fetch?: (context: FetchContext) => Promise<void>;
-  /** Days between snapshots. Defaults to 1. */
+  /** Days between snapshots. Defaults to 1. Under 1 it's a part of a day: `0.125` is every 3 hours, and the day's later snapshots are `<date>.<HHMM>`. */
   readonly every?: number;
   /** Files whose change means there's something new, for the LaunchAgent `commonplace install` sets up. */
   readonly watch?: ReadonlyArray<string>;

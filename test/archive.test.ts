@@ -1,5 +1,14 @@
 import { expect, onTestFinished, test } from "bun:test";
-import { chmodSync, mkdirSync, mkdtempSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  rmSync,
+  statSync,
+  utimesSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 
 import { build, paths } from "../src/build.ts";
@@ -284,6 +293,28 @@ test("a source with `every` waits that many days, and gets its own state directo
   rmSync(`${paths(data).raw}/weekly/${daysAgo(6)}`, { recursive: true });
   expect((await sync(only, data, () => {}))?.fetched).toEqual(["weekly"]);
   expect(states).toEqual([`${data}/state/weekly`]);
+});
+
+test("a source with `every` under a day takes later snapshots the same day, named by time", async () => {
+  const data = scratch();
+  const hourly = defineSource({
+    name: "hourly",
+    every: 1 / 24,
+    fetch: async ({ dir }) => writeFileSync(`${dir}/rows.jsonl`, ""),
+    rows: () => [],
+  });
+  const only = defineConfig({ sources: [hourly] });
+  const today = daysAgo(0);
+  const first = `${paths(data).raw}/hourly/${today}`;
+
+  snapshot(data, "hourly", today, []);
+  expect((await sync(only, data, () => {}))?.fetched).toEqual([]);
+
+  utimesSync(first, new Date(Date.now() - 3_600_000), new Date(Date.now() - 3_600_000));
+  expect((await sync(only, data, () => {}))?.fetched).toEqual(["hourly"]);
+  expect(
+    readdirSync(`${paths(data).raw}/hourly`).filter((name) => /^\d{4}-\d{2}-\d{2}\.\d{4}$/.test(name)),
+  ).toHaveLength(1);
 });
 
 test("lines split on newlines only, so JSON text may hold a line separator", async () => {

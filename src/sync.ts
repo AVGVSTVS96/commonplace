@@ -103,16 +103,21 @@ export const sync = (
 
     for (const source of config.sources) {
       const previous = snapshotsOf(raw, source.name).at(-1);
+      const every = source.every ?? 1;
+      const waited =
+        previous === undefined ||
+        (every < 1
+          ? previous.date < date || Date.now() - statSync(previous.dir).mtimeMs >= every * 86_400_000
+          : days(previous.date, date) >= every);
 
-      if (
-        source.fetch === undefined ||
-        (previous !== undefined && days(previous.date, date) < (source.every ?? 1))
-      ) {
+      if (source.fetch === undefined || !waited) {
         continue;
       }
 
-      const final = `${raw}/${source.name}/${date}`;
-      const partial = `${raw}/${source.name}/.${date}.partial`;
+      const name =
+        previous?.date === date ? `${date}.${new Date().toTimeString().slice(0, 5).replace(":", "")}` : date;
+      const final = `${raw}/${source.name}/${name}`;
+      const partial = `${raw}/${source.name}/.${name}.partial`;
       rmSync(partial, { recursive: true, force: true });
       mkdirSync(partial, { recursive: true });
       log(`fetch ${source.name}`);
