@@ -81,6 +81,16 @@ const time = (value: string): string => {
   return at;
 };
 
+/**
+ * When a post was made, read from its ID: since late 2010 an X ID starts with the milliseconds since
+ * 2010-11-04T01:42:54.657Z. Older, sequential IDs hold no time, so they give null.
+ */
+export const postedAt = (id: string): string | null => {
+  const n = /^\d+$/.test(id) ? BigInt(id) : 0n;
+
+  return n < 10n ** 12n ? null : new Date(Number((n >> 22n) + 1_288_834_974_657n)).toISOString();
+};
+
 /** One row per thing and per link, the first value of each field winning, so records come before stubs. */
 function* distinct(rows: Iterable<Row>): Generator<Row> {
   const things = new Map<string, Extract<Row, { type: "thing" }>>();
@@ -190,7 +200,12 @@ export default defineSource({
       if (tweet.in_reply_to_status_id_str !== undefined) {
         const parent = `x:tweet:${tweet.in_reply_to_status_id_str}`;
         stubs.push(
-          thing({ id: parent, kind: "tweet", author: tweet.in_reply_to_screen_name ?? null }),
+          thing({
+            id: parent,
+            kind: "tweet",
+            author: tweet.in_reply_to_screen_name ?? null,
+            created_at: postedAt(tweet.in_reply_to_status_id_str),
+          }),
           link(id, "replies_to", parent),
         );
       }
@@ -216,6 +231,7 @@ export default defineSource({
           kind: "tweet",
           text: like.fullText === undefined ? null : unescape(like.fullText),
           url: like.expandedUrl,
+          created_at: postedAt(like.tweetId),
         }),
         event({ verb: "liked", thing: id }),
       );

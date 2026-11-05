@@ -161,6 +161,30 @@ test("search matches word forms, and a link to a thing no source defined still s
   });
 });
 
+test("search dates an undated thing by its latest event, but never an undated event", async () => {
+  const data = fixture();
+  snapshot(data, "notes", "2026-01-23", [
+    thing({ id: "chat:1", kind: "chat", title: "Lisbon crew" }),
+    event({ verb: "received", thing: "chat:1", ts: "2026-03-01T00:00:00.000Z", key: "m1" }),
+    event({ verb: "sent", thing: "chat:1", ts: "2026-03-05T00:00:00.000Z", key: "m2", text: "Lisbon soon" }),
+    event({ verb: "sent", thing: "chat:1", key: "m3", text: "undated Lisbon" }),
+    thing({ id: "note:3", kind: "note", text: "Lisbon, never touched" }),
+  ]);
+  await build(config, data);
+  const at = Object.fromEntries(
+    open(paths(data).db)
+      .search("lisbon")
+      .map((hit) => [hit.id, hit.at]),
+  );
+
+  expect(at).toEqual({
+    "chat:1": "2026-03-05T00:00:00.000Z",
+    "notes:m2": "2026-03-05T00:00:00.000Z",
+    "notes:m3": null,
+    "note:3": null,
+  });
+});
+
 test("search falls back to plain words when the query isn't FTS5 syntax", async () => {
   const data = fixture();
   await build(config, data);

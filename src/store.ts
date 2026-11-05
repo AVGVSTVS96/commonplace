@@ -2,7 +2,11 @@ import { Database, SQLiteError } from "bun:sqlite";
 
 import { iso } from "./schema.ts";
 
-/** One line of a search result or timeline. `id` is citable: pass it to `show`. */
+/**
+ * One line of a search result or timeline. `id` is citable: pass it to `show`. `at` is the event's
+ * time, else when its thing was made, else when you last did something to it: a chat's last message,
+ * a page's latest visit. Null only when no source recorded any time.
+ */
 export interface Hit {
   readonly id: string;
   readonly what: string;
@@ -43,7 +47,8 @@ export const open = (file: string) => {
   const searchQuery = db.query<Hit, { q: string; limit: number }>(`
     SELECT s.id,
       coalesce(t.kind, e.verb) AS what,
-      coalesce(e.ts, t.created_at, et.created_at) AS at,
+      coalesce(e.ts, t.created_at, et.created_at,
+        (SELECT max(l.ts) FROM events l WHERE l.thing_id = t.id)) AS at,
       coalesce(t.title, et.title) AS title,
       coalesce(t.url, et.url) AS url,
       snippet(search, -1, '«', '»', '…', 24) AS text

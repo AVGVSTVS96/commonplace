@@ -11,7 +11,7 @@ import { imessage } from "../sources/imessage.ts";
 import { prompts } from "../sources/prompts.ts";
 import raindrop from "../sources/raindrop.ts";
 import takeout from "../sources/takeout.ts";
-import xArchive from "../sources/x-archive.ts";
+import xArchive, { postedAt } from "../sources/x-archive.ts";
 import { x } from "../sources/x.ts";
 
 const folder = (files: Record<string, string>): string => {
@@ -251,6 +251,12 @@ test("x-archive: posts with their full text, likes, follows, DMs and Grok", asyn
     "received x:dm:1-2",
     "sent x:grok:g",
   ]);
+});
+
+test("x-archive: a post's ID says when it was made, so likes and the posts you replied to have a date", () => {
+  expect(postedAt("1590000000000000000")).toBe("2022-11-08T15:15:15.428Z");
+  expect(postedAt("20")).toBeNull();
+  expect(postedAt("not a number")).toBeNull();
 });
 
 const chatDb = (path: string) => {
