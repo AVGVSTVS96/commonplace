@@ -44,7 +44,6 @@ export const install = async (config: Config, root: string, data: string): Promi
   </dict>
   <key>WatchPaths</key><array>${watched.map((path) => `<string>${xml(path)}</string>`).join("")}</array>
   <key>RunAtLoad</key><true/>
-  <key>ProcessType</key><string>Background</string>
   <key>StandardOutPath</key><string>${xml(log)}</string>
   <key>StandardErrorPath</key><string>${xml(log)}</string>
 </dict>
