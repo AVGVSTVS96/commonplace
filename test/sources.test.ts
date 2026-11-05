@@ -8,6 +8,7 @@ import type { Row } from "../src/schema.ts";
 import type { Source } from "../src/source.ts";
 import { github } from "../sources/github.ts";
 import { imessage } from "../sources/imessage.ts";
+import { mail } from "../sources/mail.ts";
 import { prompts } from "../sources/prompts.ts";
 import raindrop from "../sources/raindrop.ts";
 import takeout from "../sources/takeout.ts";
@@ -474,4 +475,188 @@ test("github: snapshots from older fetches, with or without reviews, commits, is
       expect.objectContaining({ verb: "saved", thing: "gh:repo:cool/tool", collections: ["github stars"] }),
     ]),
   );
+});
+
+const plainMail = [
+  "From: Ann Example <Ann@Example.com>",
+  "To: me@example.com, Bob <bob@example.com>",
+  "Subject: =?utf-8?Q?Caf=C3=A9?= plans",
+  "Date: Tue, 03 Nov 2026 10:00:00 -0500 (EST)",
+  "Message-ID: <one@example.com>",
+  "Content-Type: text/plain; charset=utf-8",
+  "Content-Transfer-Encoding: quoted-printable",
+  "",
+  "Let's meet at the caf=C3=A9 at 8.=",
+  "",
+].join("\r\n");
+
+const replyMail = [
+  "From: me@example.com",
+  "To: ann@example.com",
+  "Subject: =?utf-8?B?UmU6IENhZsOp?=",
+  "Date: Wed, 4 Nov 2026 09:00:00 +0000",
+  "Message-ID: <two@example.com>",
+  "In-Reply-To: <one@example.com>",
+  'Content-Type: multipart/mixed; boundary="b1"',
+  "",
+  "preamble",
+  "--b1",
+  'Content-Type: multipart/alternative; boundary="b2"',
+  "",
+  "--b2",
+  "Content-Type: text/html",
+  "",
+  "<p>See you <b>there</b> &amp; then</p>",
+  "--b2--",
+  "--b1",
+  "Content-Type: text/plain",
+  "Content-Disposition: attachment; filename=notes.txt",
+  "",
+  "not the body",
+  "--b1--",
+  "epilogue",
+].join("\r\n");
+
+test("mail: an email per message, sent or received by its sender, replies linked, text from plain or HTML", async () => {
+  const dir = folder({
+    "INBOX/7.eml": plainMail,
+    "Sent/2.eml": replyMail,
+    "Sent/10.eml": "Subject: no id\r\n\r\nhi",
+  });
+  const rows = await rowsOf(mail({ host: "imap.example.com", user: "me@example.com" }), dir);
+
+  expect(rows).toContainEqual(
+    expect.objectContaining({
+      id: "mail:one@example.com",
+      kind: "email",
+      title: "Café plans",
+      text: "Let's meet at the café at 8.",
+      author: "Ann Example <Ann@Example.com>",
+      created_at: "2026-11-03T15:00:00.000Z",
+      extra: { from: "ann@example.com", to: ["me@example.com", "bob@example.com"], cc: [] },
+    }),
+  );
+  expect(rows).toContainEqual(
+    expect.objectContaining({ id: "mail:two@example.com", title: "Re: Café", text: "See you there & then" }),
+  );
+  expect(rows).toContainEqual({
+    type: "link",
+    from: "mail:two@example.com",
+    rel: "replies_to",
+    to: "mail:one@example.com",
+  });
+  expect(
+    pick(rows, "event").map((row) => (row.type === "event" ? [row.verb, row.thing, row.collections] : [])),
+  ).toEqual([
+    ["received", "mail:one@example.com", ["INBOX"]],
+    ["sent", "mail:two@example.com", ["Sent"]],
+    ["received", expect.stringMatching(/^mail:[0-9a-f]{40}$/), ["Sent"]],
+  ]);
+});
+
+test("mail: fetch signs in with the password in ~/.netrc, keeps each message as it came, and takes only new UIDs", async () => {
+  const commands: Array<string> = [];
+  let inbox = false;
+  const messages = new Map([
+    ["7", plainMail],
+    ["9", replyMail],
+  ]);
+  const server = Bun.listen<{ buffer: string }>({
+    hostname: "127.0.0.1",
+    port: 0,
+    socket: {
+      open: (socket) => {
+        socket.data = { buffer: "" };
+        socket.write("* OK ready\r\n");
+      },
+      data: (socket, chunk) => {
+        socket.data.buffer += chunk.toString();
+        let end = socket.data.buffer.indexOf("\r\n");
+
+        while (end !== -1) {
+          const line = socket.data.buffer.slice(0, end);
+          socket.data.buffer = socket.data.buffer.slice(end + 2);
+          end = socket.data.buffer.indexOf("\r\n");
+          const [tag, ...words] = line.split(" ");
+          const command = words.join(" ");
+          commands.push(command);
+
+          if (command.startsWith("LOGIN")) {
+            socket.write(
+              command === 'LOGIN "me@example.com" "s3cret\\"q"' ? `${tag} OK\r\n` : `${tag} NO bad\r\n`,
+            );
+          } else if (command.startsWith("LIST")) {
+            socket.write(
+              [
+                '* LIST (\\HasNoChildren) "/" INBOX',
+                '* LIST (\\HasNoChildren \\Sent) "/" "Envoy&AOk-s"',
+                '* LIST (\\Junk) "/" "Spam"',
+                `${tag} OK`,
+                "",
+              ].join("\r\n"),
+            );
+          } else if (command.startsWith("EXAMINE")) {
+            inbox = command === 'EXAMINE "INBOX"';
+            socket.write(`* OK [UIDVALIDITY 5] UIDs valid\r\n${tag} OK\r\n`);
+          } else if (command.startsWith("UID SEARCH")) {
+            // Like a real server, `n:*` past the last UID still matches the last message.
+            const from = parseInt(words[3] ?? "", 10);
+            const uids = inbox ? [...messages.keys()] : [];
+            const found = uids.filter((uid) => Number(uid) >= from);
+            socket.write(
+              `* SEARCH ${(found.length > 0 ? found : uids.slice(-1)).join(" ")}\r\n${tag} OK\r\n`,
+            );
+          } else if (command.startsWith("UID FETCH")) {
+            for (const [i, uid] of (words[2] ?? "").split(",").entries()) {
+              const body = messages.get(uid) ?? "";
+              socket.write(`* ${i + 1} FETCH (UID ${uid} BODY[]<0> {${Buffer.byteLength(body)}}\r\n`);
+              socket.write(`${body})\r\n`);
+            }
+            socket.write(`* 1 FETCH (FLAGS (\\Seen))\r\n${tag} OK\r\n`);
+          } else {
+            socket.write(`${tag} OK\r\n`);
+          }
+        }
+      },
+    },
+  });
+  onTestFinished(() => server.stop(true));
+  const netrc = folder({
+    netrc:
+      'machine other login x password y\nmachine 127.0.0.1\n  login me@example.com\n  password s3cret"q\n',
+  });
+  const previous = process.env["NETRC"];
+  process.env["NETRC"] = `${netrc}/netrc`;
+  onTestFinished(() => {
+    process.env["NETRC"] = previous;
+  });
+
+  const source = mail({ host: "127.0.0.1", port: server.port, tls: false, user: "me@example.com" });
+  const dir = folder({});
+  const state = folder({});
+  await source.fetch?.({ dir, since: null, state });
+
+  expect(commands).toContain("UID FETCH 7,9 (UID BODY.PEEK[]<0.262144>)");
+  expect(commands).toContain('EXAMINE "Envoy&AOk-s"');
+  expect(commands.some((c) => c.includes("Spam"))).toBe(false);
+  expect(await Bun.file(`${dir}/INBOX/9.eml`).text()).toBe(replyMail);
+  expect(pick(await rowsOf(source, dir), "thing")).toHaveLength(2);
+
+  messages.set("12", plainMail.replace("<one@", "<three@"));
+  commands.length = 0;
+  const next = folder({});
+  await source.fetch?.({ dir: next, since: "2026-11-05", state });
+
+  expect(commands).toContain("UID SEARCH UID 10:*");
+  expect(commands.filter((c) => c.startsWith("UID FETCH"))).toEqual([
+    "UID FETCH 12 (UID BODY.PEEK[]<0.262144>)",
+  ]);
+  commands.length = 0;
+  await source.fetch?.({ dir: folder({}), since: "2026-11-06", state });
+  expect(commands.filter((c) => c.startsWith("UID FETCH"))).toEqual([]);
+
+  const cleartext = mail({ host: "imap.example.com", tls: false, user: "me@example.com" });
+  expect(
+    Promise.resolve(cleartext.fetch?.({ dir: folder({}), since: null, state: folder({}) })),
+  ).rejects.toThrow("in the clear");
 });

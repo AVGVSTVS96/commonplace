@@ -39,6 +39,7 @@ It's a template you own: about 1,300 lines in the core, plus one file per source
 | `prompts`  | every prompt you typed into Claude Code, Codex and Pi, and sent them from chat apps | nothing, read from disk                                 |
 | `imessage` | every iMessage and SMS conversation                                                 | macOS, Full Disk Access                                 |
 | `x`        | your bookmarks with their folders, likes, posts and replies                         | `agent-browser`, [signed in to X](#x). No paid API key. |
+| `mail`     | every message you sent and received, from any provider with IMAP                    | an app password in `~/.netrc`, [set up](#mail)          |
 
 ### From an export
 
@@ -73,13 +74,34 @@ sources: [github(), prompts(), x()],
 
 If X signs the session out, the next sync fails with the sign-in command.
 
+### Mail
+
+`mail` reads any mailbox that speaks IMAP: Gmail, iCloud, Fastmail, Yahoo, your own server, or Proton through its Bridge. It keeps each message as it came (its first 256 KB) and reads All Mail where the server has one, else your inbox, Sent and Archive. A first sync of years of mail takes 20 minutes at a time, and each sync goes on where the last one stopped.
+
+Make an app password in your provider's account settings, then put it in `~/.netrc`, where curl and git look too, never in this repo:
+
+```sh
+echo "machine imap.gmail.com login you@gmail.com password <app password>" >> ~/.netrc
+chmod 600 ~/.netrc
+```
+
+Then add it to `sources` in `commonplace.config.ts`:
+
+```ts
+import { mail } from "./sources/mail.ts";
+
+sources: [github(), prompts(), mail({ host: "imap.gmail.com", user: "you@gmail.com" })],
+```
+
+`addresses` lists your other addresses, so mail from them counts as sent; `mailboxes` picks which to read. Mail is private: add `redact` rules for anything agents shouldn't read.
+
 ### Written by your agent
 
 Anything with an export, a local database, an API or a CLI. Ask your agent, _"add my browser history to commonplace"_, and the [`add-source`](skills/add-source/SKILL.md) skill has it write the source, run it and check what landed: one file in your repo. Any coding agent with file and terminal access can follow the skill, not just Claude Code.
 
 - **Browsing:** Chrome, Safari, Firefox, Edge, Arc or any other browser's history
 - **Notes:** Obsidian or any folder of markdown, Apple Notes
-- **Mail and calendar:** Gmail via Takeout, any `.ics`
+- **Calendar:** any `.ics`, or CalDAV
 - **Chat:** Slack, Discord and Telegram exports
 - **Reading and media:** Readwise, Goodreads, Letterboxd, Spotify, Reddit exports
 
@@ -181,7 +203,7 @@ People like Bacon and Locke kept a commonplace book: one notebook for everything
 ## Next
 
 - Remote MCP for ChatGPT and claude.ai on the web
-- Mail, calendars and live browser history (Takeout already has Chrome's)
+- Calendars and live browser history (Takeout already has Chrome's)
 - Yours, if you send one back
 
 MIT

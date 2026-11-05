@@ -10,7 +10,7 @@ A source is one file, `sources/<name>.ts`, in the user's commonplace repo (`comm
 - `fetch` copies what the service gives into today's snapshot directory.
 - `rows` turns one snapshot into things, events and links, reading nothing else. Snapshots are kept forever, so a fixed `rows` rebuilds all of history.
 
-Check `sources/` first. X is built in, with no API key. When the user wants it, confirm once, then:
+Check `sources/` first. Mail is built in for any IMAP provider: README.md's Mail section has the app password and config line. X is built in, with no API key. When the user wants it, confirm once, then:
 
 1. If `agent-browser` is missing: `npm i -g agent-browser && agent-browser install`.
 2. `agent-browser --session x --restore --headed open https://x.com/login`. The user signs in and closes the window.
