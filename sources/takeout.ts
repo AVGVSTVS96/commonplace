@@ -1,10 +1,10 @@
-import { existsSync, readdirSync, readFileSync } from "node:fs";
-import { basename } from "node:path";
+import { existsSync, readdirSync } from "node:fs";
+import path from "node:path";
 
-import { digest, event, type Extra, link, type Ref, type Row, thing, urlRef } from "../src/schema.ts";
-import { csv as records, defineSource } from "../src/source.ts";
+import { digest, event, link, thing, urlRef } from "../src/schema.ts";
+import type { Extra, Ref, Row } from "../src/schema.ts";
+import { csv as records, defineSource, json } from "../src/source.ts";
 
-/** A thing to point an event at, and the URL that best opens it. */
 interface Target extends Ref {
   readonly url: string | null;
 }
@@ -20,30 +20,32 @@ interface ThingFields {
 interface EventFields {
   readonly ts: string | null;
   readonly text?: string | null;
-  readonly collections?: ReadonlyArray<string>;
+  readonly collections?: readonly string[];
   readonly extra?: Extra;
 }
 
 const put = (target: Target, fields: ThingFields): Row =>
   thing({ id: target.id, kind: target.kind, url: target.url, ...fields });
 
-const happened = (verb: "saved" | "liked" | "followed" | "posted", target: Target, fields: EventFields) =>
-  event({ verb, thing: target.id, ...fields, collections: [...(fields.collections ?? [])] });
+const happened = (
+  verb: "saved" | "liked" | "followed" | "posted",
+  target: Target,
+  fields: EventFields,
+) => event({ verb, thing: target.id, ...fields, collections: [...(fields.collections ?? [])] });
 
 const fail = (file: string, at: string, reason: string): never => {
   throw new Error(`${file} (${at}): ${reason}`);
 };
 
-/** A recorded instant as ISO UTC. Times without a zone are refused rather than read as local. */
 const utc = (raw: string, file: string, at: string): string => {
   const date = new Date(raw);
 
-  return /(Z|[+-]\d{2}:\d{2})$/.test(raw) && !Number.isNaN(date.getTime())
+  return /(?:Z|[+-]\d{2}:\d{2})$/u.test(raw) && !Number.isNaN(date.getTime())
     ? date.toISOString()
     : fail(file, at, `not a zoned time: ${raw}`);
 };
 
-const listed = (dir: string, pattern: RegExp): Array<string> =>
+const listed = (dir: string, pattern: RegExp): string[] =>
   existsSync(dir)
     ? readdirSync(dir)
         .filter((name) => pattern.test(name))
@@ -51,11 +53,12 @@ const listed = (dir: string, pattern: RegExp): Array<string> =>
         .map((name) => `${dir}/${name}`)
     : [];
 
-/** Where a link really goes: Google's `/url?q=` redirect is unwrapped. */
-const destination = (raw: string): string => {
+const unwrapGoogleRedirect = (raw: string): string => {
   const url = URL.parse(raw);
 
-  return url !== null && /^(www\.)?google\.[a-z.]+$/.test(url.hostname) && url.pathname === "/url"
+  return url !== null &&
+    /^(?:www\.)?google\.[a-z.]+$/u.test(url.hostname) &&
+    url.pathname === "/url"
     ? (url.searchParams.get("q") ?? raw)
     : raw;
 };
@@ -63,12 +66,11 @@ const destination = (raw: string): string => {
 const page = (raw: string): Target | null => {
   const ref = urlRef(raw);
 
-  return ref === null ? null : { ...ref, url: destination(raw) };
+  return ref === null ? null : { ...ref, url: unwrapGoogleRedirect(raw) };
 };
 
-/** Takeout writes some titles as a URL, some without the scheme (`site.com/path`); those aren't titles. */
 const titleUnlessUrl = (title: string, target: Target): string | null =>
-  /^https?:\/\//.test(title) || urlRef(`https://${title}`)?.id === target.id ? null : title;
+  /^https?:\/\//u.test(title) || urlRef(`https://${title}`)?.id === target.id ? null : title;
 
 const video = (id: string): Target => ({
   id: `yt:video:${id}`,
@@ -77,15 +79,18 @@ const video = (id: string): Target => ({
 });
 
 const channelId = (raw: string | undefined): string | null =>
-  raw === undefined ? null : (/\/channel\/([\w-]+)/.exec(raw)?.[1] ?? null);
+  raw === undefined ? null : (/\/channel\/(?<id>[\w-]+)/u.exec(raw)?.groups?.["id"] ?? null);
 
-// Places. Google Maps names a place by its feature ID `0x<cell>:0x<cid>`; the second half is the CID that
-// `?cid=` URLs carry in decimal, so every form below lands on the same `place:<cid>`.
+const channel = (url: string | undefined): Target | null => {
+  const id = channelId(url);
 
-const featureId = /0x[0-9a-f]+:(0x[0-9a-f]+)/i;
+  return id === null ? null : { id: `yt:channel:${id}`, kind: "channel", url: url ?? null };
+};
+
+const featureId = /0x[0-9a-f]+:(?<cid>0x[0-9a-f]+)/iu;
 
 const cidFromFeature = (feature: string): string | null => {
-  const hex = featureId.exec(feature)?.[1];
+  const hex = featureId.exec(feature)?.groups?.["cid"];
   const cid = hex === undefined ? null : BigInt(hex).toString();
 
   return cid === "0" ? null : cid;
@@ -97,25 +102,28 @@ const byCid = (cid: string): Target => ({
   url: `https://maps.google.com/?cid=${cid}`,
 });
 
-/** No CID: the name and the coordinates, rounded to 4 decimals. */
-const placeAt = (name: string, [lat, lng]: readonly [number, number], url: string | null): Target => ({
+const placeAt = (
+  name: string,
+  [lat, lng]: readonly [number, number],
+  url: string | null,
+): Target => ({
   id: `place:${name}@${lat.toFixed(4)},${lng.toFixed(4)}`,
   kind: "place",
   url,
 });
 
-const only = <A>(values: ReadonlyArray<A>): A | null => (values.length === 1 ? (values[0] ?? null) : null);
+const only = <A>(values: readonly A[]): A | null =>
+  values.length === 1 ? (values[0] ?? null) : null;
 
-/** `"40.92,-73.80"` → `[40.92, -73.80]` */
 const parseCoords = (text: string): readonly [number, number] | null => {
-  const match = /^\s*'?(-?\d{1,2}\.\d+),\s*(-?\d{1,3}\.\d+)'?\s*$/.exec(text);
+  const match = /^\s*'?(?<lat>-?\d{1,2}\.\d+),\s*(?<lng>-?\d{1,3}\.\d+)'?\s*$/u.exec(text)?.groups;
 
-  return match === null ? null : [Number(match[1]), Number(match[2])];
+  return match === undefined ? null : [Number(match["lat"]), Number(match["lng"])];
 };
 
-const allCids = (raw: string): ReadonlyArray<string> => [
+const allCids = (raw: string): readonly string[] => [
   ...new Set(
-    [...raw.matchAll(new RegExp(featureId.source, "gi"))].flatMap(([feature]) => {
+    [...raw.matchAll(new RegExp(featureId.source, "giu"))].flatMap(([feature]) => {
       const cid = cidFromFeature(feature);
 
       return cid === null ? [] : [cid];
@@ -125,23 +133,25 @@ const allCids = (raw: string): ReadonlyArray<string> => [
 
 const explicitCid = (url: URL): string | null => {
   const ftid = url.searchParams.get("ftid");
+
   const cid =
     url.searchParams.get("cid") ??
     (ftid === null ? null : cidFromFeature(ftid)) ??
     (url.hostname === "local.google.com" ? url.searchParams.get("id") : null);
 
-  return cid !== null && /^\d+$/.test(cid) && cid !== "0" ? cid : null;
+  return cid !== null && /^\d+$/u.test(cid) && cid !== "0" ? cid : null;
 };
 
 const pinned = (raw: string): readonly [number, number] | null =>
   only(
-    [...raw.matchAll(/!3d(-?\d+\.\d+)!4d(-?\d+\.\d+)/g)].map(
-      ([, lat, lng]) => [Number(lat), Number(lng)] as const,
+    [...raw.matchAll(/!3d(?<lat>-?\d+\.\d+)!4d(?<lng>-?\d+\.\d+)/gu)].map(
+      ({ groups }) => [Number(groups?.["lat"]), Number(groups?.["lng"])] as const,
     ),
   );
 
 const searchedCoords = (url: URL): readonly [number, number] | null => {
-  const segment = /\/maps\/(?:search|place)\/([^/@]+)/.exec(url.pathname)?.[1];
+  const match = /\/maps\/(?:search|place)\/(?<segment>[^/@]+)/u.exec(url.pathname);
+  const segment = match?.groups?.["segment"];
   const q = url.searchParams.get("q");
 
   return (
@@ -150,10 +160,6 @@ const searchedCoords = (url: URL): readonly [number, number] | null => {
   );
 };
 
-/**
- * The place a Google Maps URL is about: its CID when the URL carries one (as `cid`, `ftid`,
- * local.google.com `id`, or a single feature ID in the data blob), else the pinned coordinates.
- */
 const placeRef = (raw: string, name: string): Target | null => {
   const url = URL.parse(raw);
 
@@ -172,24 +178,21 @@ const placeRef = (raw: string, name: string): Target | null => {
   return at === null ? null : placeAt(name, at, raw);
 };
 
-/**
- * Directions URLs list their stops in order as `!1m<n>` groups of the data blob: after `!4m<n>!4m<n>`
- * in `/maps/dir/` URLs, after `!4m<n>!3m<n>` in the older `/maps/preview#!data=` ones. A stop holds a
- * feature ID (`1s0x…` or `2s0x…`), its coordinates (`3d`, `4d`), or neither when it was typed text.
- */
-const stops = (raw: string): ReadonlyArray<ReadonlyArray<string>> => {
+const directionStops = (raw: string): readonly (readonly string[])[] => {
   const tokens = raw.split("!");
-  const start = tokens.findIndex(
-    (token, i) => /^4m\d+$/.test(token) && /^[34]m\d+$/.test(tokens[i + 1] ?? ""),
-  );
-  const found: Array<ReadonlyArray<string>> = [];
 
-  if (start < 0) {
+  const start = tokens.findIndex(
+    (token, i) => /^4m\d+$/u.test(token) && /^[34]m\d+$/u.test(tokens[i + 1] ?? ""),
+  );
+
+  const found: (readonly string[])[] = [];
+
+  if (start === -1) {
     return found;
   }
 
   for (let i = start + 2; i < tokens.length;) {
-    const size = /^1m(\d+)$/.exec(tokens[i] ?? "")?.[1];
+    const size = /^1m(?<size>\d+)$/u.exec(tokens[i] ?? "")?.groups?.["size"];
 
     if (size === undefined) {
       break;
@@ -202,36 +205,37 @@ const stops = (raw: string): ReadonlyArray<ReadonlyArray<string>> => {
   return found;
 };
 
-const stopRef = (stop: ReadonlyArray<string>, name: string, raw: string): Target | null => {
+const stopRef = (stop: readonly string[], name: string, raw: string): Target | null => {
   const value = (key: string) => stop.find((token) => token.startsWith(key))?.slice(key.length);
-  const cid = only(
-    stop.flatMap((token) => (/^[12]s/.test(token) ? [cidFromFeature(token)] : [])).filter((c) => c !== null),
-  );
-  const [lat, lng] = [value("3d"), value("4d")];
 
-  return cid !== null
-    ? byCid(cid)
-    : lat !== undefined && lng !== undefined && Number.isFinite(Number(lat)) && Number.isFinite(Number(lng))
-      ? placeAt(name, [Number(lat), Number(lng)], raw)
-      : null;
+  const cid = only(
+    stop
+      .flatMap((token) => (/^[12]s/u.test(token) ? [cidFromFeature(token)] : []))
+      .filter((c) => c !== null),
+  );
+
+  if (cid !== null) {
+    return byCid(cid);
+  }
+
+  const [lat, lng] = [Number(value("3d")), Number(value("4d"))];
+
+  return Number.isFinite(lat) && Number.isFinite(lng) ? placeAt(name, [lat, lng], raw) : null;
 };
 
-/** The last `/maps/dir/` path segment, when it's typed coordinates. */
 const pathDestination = (raw: string): readonly [number, number] | null => {
   const url = URL.parse(raw);
-  const segment = url?.pathname.includes("/maps/dir/")
-    ? url.pathname.split("/").findLast((part) => part !== "" && !part.startsWith("@"))
-    : undefined;
+
+  const segment =
+    url?.pathname.includes("/maps/dir/") === true
+      ? url.pathname.split("/").findLast((part) => part !== "" && !part.startsWith("@"))
+      : undefined;
 
   return segment === undefined ? null : parseCoords(decodeURIComponent(segment));
 };
 
-/**
- * The destination of a "Directions to" URL: the last stop's CID or coordinates, else coordinates typed
- * as the destination. Routes to typed addresses or "Current Location" have neither.
- */
 const destinationRef = (raw: string, name: string): Target | null => {
-  const last = stops(raw).at(-1);
+  const last = directionStops(raw).at(-1);
   const stop = last === undefined ? null : stopRef(last, name, raw);
 
   if (stop !== null) {
@@ -243,15 +247,13 @@ const destinationRef = (raw: string, name: string): Target | null => {
   return typed === null ? null : placeAt(name, typed, raw);
 };
 
-// My Activity: every product shares one record format, and the verb is the title's prefix.
-
 interface Activity {
   readonly title: string;
   readonly titleUrl?: string;
   readonly time: string;
   readonly description?: string;
-  readonly subtitles?: ReadonlyArray<{ readonly name: string; readonly url?: string }>;
-  readonly details?: ReadonlyArray<{ readonly name: string }>;
+  readonly subtitles?: readonly { readonly name: string; readonly url?: string }[];
+  readonly details?: readonly { readonly name: string }[];
 }
 
 type Action =
@@ -265,70 +267,81 @@ type Action =
   | "followed"
   | null;
 
-/**
- * Every title prefix in the export, in match order, and what it means; `null` is left out on purpose,
- * and a title that matches none fails the snapshot rather than default. A rule marked "without link"
- * applies only to entries that have no `titleUrl`.
- */
-const rules: ReadonlyArray<readonly [RegExp, Action] | readonly [RegExp, Action, "without link"]> = [
-  [/^Searched for (.+)$/s, "searched"],
-  [/^Searched with Google Lens$/, null], // image search, the export keeps no query
-  [/^Visited (.+)$/s, "visited"],
-  [/^Shopped for (.+)$/s, "visited"],
-  [/^Opened My Maps map: (.+)$/s, "visited"],
-  [/^Confirmed delivery info and viewed menu for (.+)$/s, "visited"],
-  [/^Watched https:\/\/www\.youtube\.com\/watch\?v=$/, null], // an ad with an empty video id
-  [/^Watched (.+)$/s, "watched"],
-  [/^Viewed area (in|around) /, null], // map panned, no place
-  [/^Viewed your Timeline$/, null],
-  [/^Viewed (?!https?:)/, null, "without link"], // a search result card with neither link nor location
-  [/^Viewed (.+)$/s, "viewed"],
-  [/^Directions to (.+)$/s, "navigated"],
-  [/^Liked (.+)$/s, "liked"],
-  [/^Saved (.+)$/s, "saved"],
-  [/^Subscribed to (.+)$/s, "followed"],
-  [/^Joined YouTube Premium$/, null],
-  [/^Joined (.+)$/s, "followed"],
-  [/^Disliked /, null],
-  [/^Rented /, null], // a purchase; the viewing is its own Watched entry
-  [/^Called /, null],
-  [/^Shared /, null],
-  [/^Used /, null],
-  [/^Explored on Google Maps$/, null],
-  [/^Ran internet speed test$/, null],
-  [/^Answered survey question$/, null],
-  [/^Dismissed /, null],
-  [/^Voted on /, null],
-  [/^Tracked flight prices$/, null],
-  [/^Defined /, null], // a dictionary card for a search that's logged on its own
-  [/^\d+ notifications?$/, null],
-  [/^Google (automatically added|will now automatically add) /, null],
-  [/^Set Food Preferences$/, null],
+const rules: readonly (readonly [RegExp, Action] | readonly [RegExp, Action, "without link"])[] = [
+  [/^Searched for (?<rest>.+)$/su, "searched"],
+  [/^Searched with Google Lens$/u, null],
+  [/^Visited (?<rest>.+)$/su, "visited"],
+  [/^Shopped for (?<rest>.+)$/su, "visited"],
+  [/^Opened My Maps map: (?<rest>.+)$/su, "visited"],
+  [/^Confirmed delivery info and viewed menu for (?<rest>.+)$/su, "visited"],
+  [/^Watched https:\/\/www\.youtube\.com\/watch\?v=$/u, null],
+  [/^Watched (?<rest>.+)$/su, "watched"],
+  [/^Viewed area (?:in|around) /u, null],
+  [/^Viewed your Timeline$/u, null],
+  [/^Viewed (?!https?:)/u, null, "without link"],
+  [/^Viewed (?<rest>.+)$/su, "viewed"],
+  [/^Directions to (?<rest>.+)$/su, "navigated"],
+  [/^Liked (?<rest>.+)$/su, "liked"],
+  [/^Saved (?<rest>.+)$/su, "saved"],
+  [/^Subscribed to (?<rest>.+)$/su, "followed"],
+  [/^Joined YouTube Premium$/u, null],
+  [/^Joined (?<rest>.+)$/su, "followed"],
+  [/^Disliked /u, null],
+  [/^Rented /u, null],
+  [/^Called /u, null],
+  [/^Shared /u, null],
+  [/^Used /u, null],
+  [/^Explored on Google Maps$/u, null],
+  [/^Ran internet speed test$/u, null],
+  [/^Answered survey question$/u, null],
+  [/^Dismissed /u, null],
+  [/^Voted on /u, null],
+  [/^Tracked flight prices$/u, null],
+  [/^Defined /u, null],
+  [/^\d+ notifications?$/u, null],
+  [/^Google (?:automatically added|will now automatically add) /u, null],
+  [/^Set Food Preferences$/u, null],
 ];
 
 const classify = (product: string, record: Activity): readonly [Action, string] | undefined => {
   for (const [pattern, action, when] of rules) {
-    const match = when === undefined || record.titleUrl === undefined ? pattern.exec(record.title) : null;
+    const match =
+      when === undefined || record.titleUrl === undefined ? pattern.exec(record.title) : null;
 
     if (match !== null) {
-      return [action, match[1] ?? record.title];
+      return [action, match.groups?.["rest"] ?? record.title];
     }
   }
 
-  // Old Maps clients logged a place view as the bare place name with its Maps URL.
-  return product === "Maps" && record.titleUrl !== undefined ? ["viewed", record.title] : undefined;
+  const isOldMapsPlaceView = product === "Maps" && record.titleUrl !== undefined;
+
+  return isOldMapsPlaceView ? ["viewed", record.title] : undefined;
 };
 
-function* activityRows(file: string, product: string, record: Activity, at: string): Generator<Row> {
+const uploaderFields = (record: Activity): ThingFields => {
+  const uploader = record.subtitles?.[0];
+  const id = channelId(uploader?.url);
+
+  return id === null ? {} : { author: uploader?.name ?? null, extra: { channel: id } };
+};
+
+const activityRows = function* activityRows(
+  file: string,
+  product: string,
+  record: Activity,
+  at: string,
+): Generator<Row> {
   const [action, rest] =
-    classify(product, record) ?? fail(file, at, `no verb for title ${JSON.stringify(record.title)}`);
+    classify(product, record) ??
+    fail(file, at, `no verb for title ${JSON.stringify(record.title)}`);
 
   if (action === null) {
     return;
   }
 
   const ts = utc(record.time, file, at);
-  const titleUrl = record.titleUrl;
+  const { titleUrl } = record;
+
   const fields = {
     ts,
     text: record.description ?? null,
@@ -337,13 +350,18 @@ function* activityRows(file: string, product: string, record: Activity, at: stri
         ? { product }
         : { product, details: record.details.map((detail) => detail.name) },
   };
-  const uploader = record.subtitles?.[0];
-  const channel = channelId(uploader?.url);
-  const byUploader = channel === null ? {} : { author: uploader?.name ?? null, extra: { channel } };
+
+  const byUploader = uploaderFields(record);
+
   const linked = (target: Target | null): Target =>
     target ?? fail(file, at, `no thing to point ${JSON.stringify(record.title)} at`);
+
   const visited = () => (titleUrl === undefined ? null : page(titleUrl)) ?? page(rest);
-  const repeat = (verb: "searched" | "visited" | "watched" | "viewed" | "navigated", target: Target) =>
+
+  const repeat = (
+    verb: "searched" | "visited" | "watched" | "viewed" | "navigated",
+    target: Target,
+  ) =>
     event({
       verb,
       thing: target.id,
@@ -351,56 +369,75 @@ function* activityRows(file: string, product: string, record: Activity, at: stri
       ...fields,
     });
 
+  // oxlint-disable-next-line eslint/default-case -- the cases cover every non-null Action
   switch (action) {
     case "searched": {
       const query: Target = {
-        id: `query:${rest.replace(/\s+/g, " ").trim().toLowerCase()}`,
+        id: `query:${rest.replaceAll(/\s+/gu, " ").trim().toLowerCase()}`,
         kind: "query",
         url: null,
       };
+
       yield put(query, { title: rest.trim() });
       yield repeat("searched", query);
+
       return;
     }
+
     case "visited":
     case "watched": {
       const target = linked(visited());
+
       yield put(target, { title: titleUnlessUrl(rest, target), ...byUploader });
       yield repeat(action, target);
+
       return;
     }
+
     case "viewed": {
-      const target = linked((titleUrl === undefined ? null : placeRef(titleUrl, rest)) ?? visited());
+      const target = linked(
+        (titleUrl === undefined ? null : placeRef(titleUrl, rest)) ?? visited(),
+      );
+
       yield put(target, { title: titleUnlessUrl(rest, target), ...byUploader });
       yield repeat("viewed", target);
+
       return;
     }
+
     case "navigated": {
-      const target = linked((titleUrl === undefined ? null : destinationRef(titleUrl, rest)) ?? visited());
+      const target = linked(
+        (titleUrl === undefined ? null : destinationRef(titleUrl, rest)) ?? visited(),
+      );
+
       yield put(target, { title: rest });
       yield repeat("navigated", target);
+
       return;
     }
+
     case "liked":
     case "saved": {
       const target = linked(visited());
+
       yield put(target, { title: titleUnlessUrl(rest, target), ...byUploader });
       yield happened(action, target, fields);
+
       return;
     }
+
     case "followed": {
-      const id = channelId(titleUrl);
-      const target = linked(
-        id === null ? null : { id: `yt:channel:${id}`, kind: "channel", url: titleUrl ?? null },
-      );
+      const target = linked(channel(titleUrl));
+
       yield put(target, { title: rest });
       yield happened("followed", target, fields);
     }
   }
-}
+};
 
-function* myActivity(dir: string): Generator<Row> {
+const myActivity = async function* myActivity(dir: string): AsyncGenerator<Row> {
   const root = `${dir}/My Activity`;
+
   const files = existsSync(root)
     ? readdirSync(root)
         .map((product) => `${root}/${product}/MyActivity.json`)
@@ -410,22 +447,17 @@ function* myActivity(dir: string): Generator<Row> {
 
   for (const file of files) {
     const product = file.split("/").at(-2) ?? file;
+    const activity = await json<readonly Activity[]>(file);
 
-    for (const [i, record] of (JSON.parse(readFileSync(file, "utf8")) as ReadonlyArray<Activity>).entries()) {
+    for (const [i, record] of activity.entries()) {
       yield* activityRows(file, product, record, `record ${i + 1}`);
     }
   }
-}
+};
 
-// CSV files: Maps lists and YouTube.
-
-/**
- * Rows of a CSV file by column name, with the row's place in the file. Takeout prefixes a space to cells
- * that start with `-`, `=`, `+` or `@` against spreadsheet formulas, and pads some files with empty rows.
- */
-function* csv<Column extends string>(
+const csv = function* csv<Column extends string>(
   file: string,
-  required: ReadonlyArray<Column>,
+  required: readonly Column[],
 ): Generator<readonly [Record<Column, string> & Record<string, string | undefined>, string]> {
   if (!existsSync(file)) {
     return;
@@ -436,30 +468,35 @@ function* csv<Column extends string>(
   for (const [i, cells] of body.entries()) {
     if (cells.some((cell) => cell !== "")) {
       const at = `row ${i + 1}`;
-      const row = Object.fromEntries(header.map((name, c) => [name, cells[c]?.replace(/^ (?=[-=+@])/, "")]));
+
+      const row = Object.fromEntries(
+        header.map((name, c) => [name, cells[c]?.replace(/^ (?=[-=+@])/u, "")]),
+      );
+
       const missing = required.find((column) => row[column] === undefined);
 
       if (missing !== undefined) {
         fail(file, at, `no ${missing} column`);
       }
 
+      // SAFETY: every required column was checked present just above.
       yield [row as Record<Column, string>, at];
     }
   }
-}
+};
 
 const nonEmpty = (value: string): string | null => (value.trim() === "" ? null : value);
 
-/** `Saved/<list>.csv`: one Maps list per file, named by the file. Lists can hold web pages too. No save time is recorded. */
-function* savedLists(dir: string): Generator<Row> {
-  for (const file of listed(`${dir}/Saved`, /\.csv$/)) {
-    const list = basename(file, ".csv");
+const savedLists = function* savedLists(dir: string): Generator<Row> {
+  for (const file of listed(`${dir}/Saved`, /\.csv$/u)) {
+    const list = path.basename(file, ".csv");
 
     for (const [row, at] of csv(file, ["Title", "Note", "URL", "Tags", "Comment"])) {
       const target =
         placeRef(row.URL, row.Title) ??
         page(row.URL) ??
         fail(file, at, `no place for ${JSON.stringify(row.Title)}`);
+
       const note = [row.Note, row.Comment].filter((part) => part.trim() !== "");
       const tags = nonEmpty(row.Tags);
 
@@ -472,7 +509,7 @@ function* savedLists(dir: string): Generator<Row> {
       });
     }
   }
-}
+};
 
 interface Feature<P> {
   readonly geometry: { readonly coordinates: readonly [number, number] };
@@ -484,20 +521,19 @@ interface Location {
   readonly address?: string;
 }
 
-function* features<P>(file: string): Generator<readonly [Feature<P>, string]> {
+const features = async function* features<P>(
+  file: string,
+): AsyncGenerator<readonly [Feature<P>, string]> {
   if (existsSync(file)) {
-    const { features: all } = JSON.parse(readFileSync(file, "utf8")) as {
-      features: ReadonlyArray<Feature<P>>;
-    };
+    const { features: all } = await json<{ features: readonly Feature<P>[] }>(file);
 
     for (const [i, feature] of all.entries()) {
       yield [feature, `features[${i}]`];
     }
   }
-}
+};
 
-/** GeoJSON is `[lng, lat]`; Takeout writes `[0, 0]` when it has no location. */
-const pointOf = ([lng, lat]: readonly [number, number]): readonly [number, number] | null =>
+const latLngOfGeoJson = ([lng, lat]: readonly [number, number]): readonly [number, number] | null =>
   lng === 0 && lat === 0 ? null : [lat, lng];
 
 const placeFields = (location: Location | undefined): ThingFields => ({
@@ -505,28 +541,32 @@ const placeFields = (location: Location | undefined): ThingFields => ({
   extra: location?.address === undefined ? {} : { address: location.address },
 });
 
-function* places(dir: string): Generator<Row> {
+const places = async function* places(dir: string): AsyncGenerator<Row> {
   const saved = `${dir}/Maps (your places)/Saved Places.json`;
   const reviews = `${dir}/Maps (your places)/Reviews.json`;
   const labeled = `${dir}/Maps/My labeled places/Labeled places.json`;
 
-  for (const [{ geometry, properties }, at] of features<{
+  for await (const [{ geometry, properties }, at] of features<{
     date: string;
     google_maps_url: string;
     location?: Location;
   }>(saved)) {
     const name = properties.location?.name ?? properties.google_maps_url;
-    const point = pointOf(geometry.coordinates);
+    const point = latLngOfGeoJson(geometry.coordinates);
+
     const target =
       placeRef(properties.google_maps_url, name) ??
       (point === null ? null : placeAt(name, point, properties.google_maps_url)) ??
       fail(saved, at, `no place for ${JSON.stringify(name)}`);
 
     yield put(target, placeFields(properties.location));
-    yield happened("saved", target, { ts: utc(properties.date, saved, at), collections: ["Saved Places"] });
+    yield happened("saved", target, {
+      ts: utc(properties.date, saved, at),
+      collections: ["Saved Places"],
+    });
   }
 
-  for (const [{ properties }, at] of features<{
+  for await (const [{ properties }, at] of features<{
     date: string;
     google_maps_url: string;
     location: Location;
@@ -534,8 +574,10 @@ function* places(dir: string): Generator<Row> {
     review_text_published?: string;
   }>(reviews)) {
     const name = properties.location.name ?? properties.google_maps_url;
+
     const target =
-      placeRef(properties.google_maps_url, name) ?? fail(reviews, at, `no place for ${JSON.stringify(name)}`);
+      placeRef(properties.google_maps_url, name) ??
+      fail(reviews, at, `no place for ${JSON.stringify(name)}`);
 
     yield put(target, placeFields(properties.location));
     yield happened("posted", target, {
@@ -548,21 +590,29 @@ function* places(dir: string): Generator<Row> {
     });
   }
 
-  // Places given a private label (Home, Work, …). No CID, so they're keyed by coordinates.
-  for (const [{ geometry, properties }, at] of features<{ name: string; address?: string }>(labeled)) {
+  for await (const [{ geometry, properties }, at] of features<{ name: string; address?: string }>(
+    labeled,
+  )) {
     const name = properties.address ?? properties.name;
-    const point = pointOf(geometry.coordinates) ?? fail(labeled, at, `no place for ${JSON.stringify(name)}`);
+
+    const point =
+      latLngOfGeoJson(geometry.coordinates) ??
+      fail(labeled, at, `no place for ${JSON.stringify(name)}`);
+
     const target = placeAt(name, point, null);
 
     yield put(target, { title: name });
-    yield happened("saved", target, { ts: null, text: properties.name, collections: ["Labeled places"] });
+    yield happened("saved", target, {
+      ts: null,
+      text: properties.name,
+      collections: ["Labeled places"],
+    });
   }
-}
+};
 
-function* youtube(dir: string): Generator<Row> {
+const youtube = function* youtube(dir: string): Generator<Row> {
   const root = `${dir}/YouTube and YouTube Music`;
 
-  // No subscribe time here; the `Subscribed to` activity entries carry it and merge into the same event.
   for (const [row] of csv(`${root}/subscriptions/subscriptions.csv`, [
     "Channel Id",
     "Channel Url",
@@ -578,8 +628,8 @@ function* youtube(dir: string): Generator<Row> {
     yield happened("followed", target, { ts: null });
   }
 
-  for (const file of listed(`${root}/playlists`, /-videos\.csv$/)) {
-    const playlist = basename(file, "-videos.csv");
+  for (const file of listed(`${root}/playlists`, /-videos\.csv$/u)) {
+    const playlist = path.basename(file, "-videos.csv");
 
     for (const [row, at] of csv(file, ["Video ID", "Playlist Video Creation Timestamp"])) {
       const target = video(row["Video ID"]);
@@ -592,9 +642,7 @@ function* youtube(dir: string): Generator<Row> {
     }
   }
 
-  // Each comment is its own thing, posted once, replying to the video or community post it's on.
-  // Older comment files lack the `Parent Comment ID` and `Post ID` columns.
-  for (const file of listed(`${root}/comments`, /\.csv$/)) {
+  for (const file of listed(`${root}/comments`, /\.csv$/u)) {
     for (const [row, at] of csv(file, [
       "Comment ID",
       "Comment Create Timestamp",
@@ -602,15 +650,19 @@ function* youtube(dir: string): Generator<Row> {
       "Comment Text",
     ])) {
       const ts = utc(row["Comment Create Timestamp"], file, at);
-      const segments = JSON.parse(`[${row["Comment Text"]}]`) as ReadonlyArray<{ text?: string }>;
+
+      // SAFETY: Takeout writes a comment's text as comma-separated `{"text": …}` JSON objects.
+      const segments = JSON.parse(`[${row["Comment Text"]}]`) as readonly { text?: string }[];
+
       const post = row["Post ID"] ?? "";
+      const postPage = post === "" ? null : page(`https://www.youtube.com/post/${post}`);
+
       const on =
-        (row["Video ID"] !== ""
-          ? video(row["Video ID"])
-          : post !== ""
-            ? page(`https://www.youtube.com/post/${post}`)
-            : null) ?? fail(file, at, "comment on neither a video nor a post");
+        (row["Video ID"] === "" ? postPage : video(row["Video ID"])) ??
+        fail(file, at, "comment on neither a video nor a post");
+
       const parent = row["Parent Comment ID"] ?? "";
+
       const comment: Target = {
         id: `yt:comment:${row["Comment ID"]}`,
         kind: "comment",
@@ -648,19 +700,11 @@ function* youtube(dir: string): Generator<Row> {
     });
     yield happened("posted", video(row["Video ID"]), { ts });
   }
-}
+};
 
-/**
- * A Google Takeout export unzipped into the snapshot (its `Takeout/` folder, or what's in it), with My Activity
- * as JSON: searches, visits, watches and views from My Activity; Maps lists, saved and labeled places and
- * reviews; YouTube subscriptions, playlists, comments and uploads. Products you didn't export are simply absent.
- *
- * Left out on purpose: `YouTube and YouTube Music/history` (the same watches and searches as
- * My Activity), and Calendar, Play Store, Discover and Timeline settings, which no verb fits.
- */
 export default defineSource({
   name: "takeout",
-  rows: function* ({ dir }) {
+  async *rows({ dir }) {
     const root = existsSync(`${dir}/Takeout`) ? `${dir}/Takeout` : dir;
 
     yield* myActivity(root);

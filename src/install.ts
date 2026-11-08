@@ -1,18 +1,15 @@
-import { $ } from "bun";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
+
+import { $ } from "bun";
 
 import type { Config } from "./config.ts";
 
 const label = "dev.commonplace.sync";
 
-const xml = (text: string) => text.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
+const xml = (text: string) =>
+  text.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
 
-/**
- * Keeps the archive current on macOS: a LaunchAgent that syncs at login, when a file a source watches
- * changes (Messages' database, for iMessage), and when a hook kicks it. launchd starts a small fixed binary
- * that runs `commonplace sync`, so the Full Disk Access you grant that binary once survives every code change.
- */
 export const install = async (config: Config, root: string, data: string): Promise<string> => {
   if (process.platform !== "darwin") {
     return "Only macOS so far. Elsewhere the Claude Code plugin's hook keeps the archive current.";
@@ -25,6 +22,7 @@ export const install = async (config: Config, root: string, data: string): Promi
   const uid = process.getuid?.() ?? 0;
 
   mkdirSync(data, { recursive: true });
+
   if (!existsSync(launcher)) {
     await $`bun build --compile ${`${root}/src/launcher.ts`} --outfile ${launcher}`.quiet();
   }

@@ -1,18 +1,17 @@
 import { Database } from "bun:sqlite";
 import { existsSync, readdirSync, renameSync, rmSync } from "node:fs";
-import { basename } from "node:path";
+import path from "node:path";
 
 import type { Config } from "./config.ts";
-import { type Event, type Extra, isOnce, type Link, problem, type Row, type Thing } from "./schema.ts";
+import { isOnce, problem } from "./schema.ts";
+import type { Event, Extra, Link, Row, Thing } from "./schema.ts";
 import type { Snapshot, Source } from "./source.ts";
 
-/** `<YYYY-MM-DD>`, or `<YYYY-MM-DD>.<label>` for a second snapshot of one day, like an archive merged in from elsewhere. */
-const datePattern = /^\d{4}-\d{2}-\d{2}(\.[\w-]+)?$/;
+const datePattern = /^\d{4}-\d{2}-\d{2}(?:\.[\w-]+)?$/u;
 
 export const paths = (data: string) => ({ raw: `${data}/raw`, db: `${data}/commonplace.db` });
 
-/** Every finished snapshot of one source, oldest first. In-progress `.partial` dirs never match. */
-export const snapshotsOf = (raw: string, source: string): Array<Snapshot> => {
+export const snapshotsOf = (raw: string, source: string): Snapshot[] => {
   const dir = `${raw}/${source}`;
 
   return existsSync(dir)
@@ -23,7 +22,8 @@ export const snapshotsOf = (raw: string, source: string): Array<Snapshot> => {
     : [];
 };
 
-type Sourced<T> = T & { readonly sources: ReadonlyArray<string> };
+type Sourced<T> = T & { readonly sources: readonly string[] };
+
 type Stored = Sourced<Omit<Event, "key"> & { readonly id: string }>;
 
 export interface Outcome {
@@ -38,71 +38,67 @@ export interface Outcome {
 }
 
 export interface Built {
-  readonly outcomes: ReadonlyArray<Outcome>;
+  readonly outcomes: readonly Outcome[];
   readonly things: number;
   readonly events: number;
   readonly links: number;
   readonly orphans: number;
 }
 
-const hash = (value: unknown): string =>
-  new Bun.CryptoHasher("sha1").update(JSON.stringify(value)).digest("hex").slice(0, 16);
+const hash = (fields: readonly (string | null)[]): string =>
+  new Bun.CryptoHasher("sha1").update(JSON.stringify(fields)).digest("hex").slice(0, 16);
 
 const eventId = (source: string, event: Event): string =>
   isOnce(event.verb)
     ? `${event.verb}:${event.thing}`
     : `${source}:${event.key ?? hash([event.verb, event.thing, event.ts, event.text])}`;
 
-const union = (a: ReadonlyArray<string>, b: ReadonlyArray<string>): Array<string> => [
-  ...new Set([...a, ...b]),
-];
+const union = (a: readonly string[], b: readonly string[]): string[] => [...new Set([...a, ...b])];
 
-const present = (extra: Extra): Extra =>
-  Object.fromEntries(Object.entries(extra).filter(([, v]) => v !== null));
+const present = <T extends object>(fields: T): Partial<T> =>
+  // SAFETY: every entry comes from `fields` itself, only the nulls are left out.
+  Object.fromEntries(Object.entries(fields).filter(([, value]) => value !== null)) as Partial<T>;
 
-/** Fields the newcomer has replace the held ones; nulls never erase, but do fill a key the held row lacks. */
-const merge = <T extends Sourced<{ readonly extra: Extra }>>(held: T | undefined, offered: T): T => {
-  if (held === undefined) {
-    return offered;
-  }
+const merge = <T extends Sourced<{ readonly extra: Extra }>>(held: T | undefined, offered: T): T =>
+  held === undefined
+    ? offered
+    : {
+        ...held,
+        ...present(offered),
+        sources: union(held.sources, offered.sources),
+        extra: { ...offered.extra, ...held.extra, ...present(offered.extra) },
+      };
 
-  const next: Record<string, unknown> = { ...held };
-
-  for (const [key, value] of Object.entries(offered)) {
-    if (value !== null) {
-      next[key] = value;
-    }
-  }
-
-  return {
-    ...(next as T),
-    sources: union(held.sources, offered.sources),
-    extra: { ...offered.extra, ...held.extra, ...present(offered.extra) },
-  };
-};
-
+// oxlint-disable-next-line anti-slop/no-unknown-parameters -- a catch clause hands over unknown, and this is where it's read
 export const errorMessage = (error: unknown): string =>
   error instanceof Error ? error.message : String(error);
 
-/** All of a snapshot's rows, or why it failed. Never half a snapshot. */
-const load = async (source: Source, snapshot: Snapshot): Promise<Array<Row> | string> => {
-  const rows: Array<Row> = [];
+const load = async (
+  source: Source,
+  snapshot: Snapshot,
+): Promise<{ rows: readonly Row[]; error: string | null }> => {
+  const rows: Row[] = [];
+
+  const failed = (why: string) => ({
+    rows: [],
+    error: `${snapshot.dir}: row ${rows.length + 1}: ${why}`,
+  });
 
   try {
     for await (const row of source.rows(snapshot)) {
       const issue = problem(row);
 
       if (issue !== null) {
-        return `row ${rows.length + 1}: ${issue}`;
+        return failed(issue);
       }
 
       rows.push(row);
     }
   } catch (error) {
-    return `row ${rows.length + 1}: ${errorMessage(error)}`;
+    return failed(errorMessage(error));
   }
 
-  return rows;
+  return { rows, error: null };
 };
 
 const schema = `
@@ -137,13 +133,12 @@ const indexes = `
 `;
 
 interface Corpus {
-  readonly things: ReadonlyArray<Sourced<Thing>>;
-  readonly events: ReadonlyArray<Stored>;
-  readonly links: ReadonlyArray<Sourced<Link>>;
-  readonly outcomes: ReadonlyArray<Outcome>;
+  readonly things: readonly Sourced<Thing>[];
+  readonly events: readonly Stored[];
+  readonly links: readonly Sourced<Link>[];
+  readonly outcomes: readonly Outcome[];
 }
 
-/** Writes beside `file` and renames over it, so readers see the old archive or the new one, never half of one. */
 const write = (file: string, corpus: Corpus): void => {
   const tmp = `${file}.tmp`;
   rmSync(tmp, { force: true });
@@ -152,51 +147,64 @@ const write = (file: string, corpus: Corpus): void => {
   const json = JSON.stringify;
 
   db.run("PRAGMA journal_mode = OFF");
-  db.exec(schema);
+  db.run(schema);
   db.transaction(() => {
-    const thing = db.prepare("INSERT INTO things VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)");
-    const event = db.prepare("INSERT INTO events VALUES (?, ?, ?, ?, ?, ?, ?, ?)");
-    const link = db.prepare("INSERT INTO links VALUES (?, ?, ?, ?)");
-    const snapshot = db.prepare("INSERT INTO snapshots VALUES (?, ?, ?, ?, ?, ?, ?, ?)");
+    const thing = db.prepare(
+      "INSERT INTO things VALUES ($id, $kind, $title, $text, $url, $author, $created_at, $sources, $extra)",
+    );
+
+    const event = db.prepare(
+      "INSERT INTO events VALUES ($id, $verb, $ts, $thing, $text, $collections, $sources, $extra)",
+    );
+
+    const link = db.prepare("INSERT INTO links VALUES ($from, $rel, $to, $sources)");
+
+    const snapshot = db.prepare(
+      "INSERT INTO snapshots VALUES ($source, $snapshot, $date, $things, $events, $links, $redacted, $error)",
+    );
 
     for (const t of corpus.things) {
-      thing.run(t.id, t.kind, t.title, t.text, t.url, t.author, t.created_at, json(t.sources), json(t.extra));
+      thing.run({ ...t, sources: json(t.sources), extra: json(t.extra) });
     }
+
     for (const e of corpus.events) {
-      event.run(e.id, e.verb, e.ts, e.thing, e.text, json(e.collections), json(e.sources), json(e.extra));
+      event.run({
+        ...e,
+        collections: json(e.collections),
+        sources: json(e.sources),
+        extra: json(e.extra),
+      });
     }
+
     for (const l of corpus.links) {
-      link.run(l.from, l.rel, l.to, json(l.sources));
+      link.run({ ...l, sources: json(l.sources) });
     }
+
     for (const o of corpus.outcomes) {
-      snapshot.run(o.source, o.snapshot, o.date, o.things, o.events, o.links, o.redacted, o.error);
+      snapshot.run({ ...o });
     }
   })();
-  db.exec(indexes);
+  db.run(indexes);
   db.close();
 
   renameSync(tmp, file);
 };
 
-/**
- * Replays every snapshot into a fresh database. Weaker sources replay first and each source
- * replays oldest first, so the strongest, newest value of every field lands last and wins.
- */
 export const build = async (config: Config, data: string): Promise<Built> => {
   const { raw, db } = paths(data);
   const rank = (source: string) => config.sources.findIndex(({ name }) => name === source);
   const things = new Map<string, Sourced<Thing>>();
   const events = new Map<string, Stored>();
   const links = new Map<string, Sourced<Link>>();
-  const outcomes: Array<Outcome> = [];
+  const outcomes: Outcome[] = [];
 
   for (const source of config.sources.toReversed()) {
     for (const snapshot of snapshotsOf(raw, source.name)) {
-      const rows = await load(source, snapshot);
+      const { rows, error } = await load(source, snapshot);
       const counts = { things: 0, events: 0, links: 0, redacted: 0 };
       const sources = [source.name];
 
-      for (const row of typeof rows === "string" ? [] : rows) {
+      for (const row of rows) {
         if (config.redact?.(row, source.name) === true) {
           counts.redacted += 1;
           continue;
@@ -226,28 +234,40 @@ export const build = async (config: Config, data: string): Promise<Built> => {
 
       outcomes.push({
         source: source.name,
-        snapshot: basename(snapshot.dir),
+        snapshot: path.basename(snapshot.dir),
         date: snapshot.date,
         ...counts,
-        error: typeof rows === "string" ? `${snapshot.dir}: ${rows}` : null,
+        error,
       });
     }
   }
 
   const byRank = (a: string, b: string) => rank(a) - rank(b);
+
   const ranked = <T extends Sourced<object>>(row: T): T => ({
     ...row,
     sources: row.sources.toSorted(byRank),
   });
+
   const kept = {
-    events: [...events.values()].filter((e) => things.has(e.thing)).map(ranked),
-    links: [...links.values()].filter((l) => things.has(l.from)).map(ranked),
+    events: events
+      .values()
+      .filter((e) => things.has(e.thing))
+      .map(ranked)
+      .toArray(),
+    links: links
+      .values()
+      .filter((l) => things.has(l.from))
+      .map(ranked)
+      .toArray(),
   };
 
   write(db, {
     things: [...things.values()].map(ranked),
     ...kept,
-    outcomes: outcomes.toSorted((a, b) => byRank(a.source, b.source) || a.snapshot.localeCompare(b.snapshot)),
+    outcomes: outcomes.toSorted(
+      (a, b) => byRank(a.source, b.source) || a.snapshot.localeCompare(b.snapshot),
+    ),
   });
 
   return {
@@ -261,10 +281,9 @@ export const build = async (config: Config, data: string): Promise<Built> => {
 
 const n = (value: number): string => value.toLocaleString("en-US");
 
-const cell = (cells: ReadonlyArray<string>): string =>
+const cell = (cells: readonly string[]): string =>
   cells.map((c, i) => (i < 2 ? c.padEnd(18) : c.padStart(9))).join("");
 
-/** The coverage report: what each snapshot gave, what the archive holds, and what failed. */
 export const report = (built: Built): string => {
   const failed = built.outcomes.filter((o) => o.error !== null);
 
@@ -281,7 +300,10 @@ export const report = (built: Built): string => {
       ? [`  dropped ${n(built.orphans)} events/links from a thing no source defined`]
       : []),
     ...(failed.length > 0
-      ? [`${failed.length} snapshot(s) failed and were skipped:`, ...failed.map((o) => `  ${o.error}`)]
+      ? [
+          `${failed.length} snapshot(s) failed and were skipped:`,
+          ...failed.map((o) => `  ${o.error}`),
+        ]
       : []),
   ].join("\n");
 };

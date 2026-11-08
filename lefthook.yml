@@ -1,0 +1,4 @@
+pre-commit:
+  commands:
+    check:
+      run: env -u GIT_DIR -u GIT_INDEX_FILE -u GIT_WORK_TREE -u GIT_PREFIX bun run check

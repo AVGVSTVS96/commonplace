@@ -1,6 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 
-import { event, iso, link, type Row, thing, urlRef } from "../src/schema.ts";
+import { event, iso, link, thing, urlRef } from "../src/schema.ts";
+import type { Json, Row } from "../src/schema.ts";
 import { defineSource, json, lines } from "../src/source.ts";
 
 interface User {
@@ -22,7 +23,7 @@ interface Tweet {
     readonly note_tweet_results?: {
       readonly result?: {
         readonly text?: string;
-        readonly entity_set?: { readonly urls?: ReadonlyArray<Url> };
+        readonly entity_set?: { readonly urls?: readonly Url[] };
       };
     };
   };
@@ -34,8 +35,8 @@ interface Tweet {
     readonly conversation_id_str?: string;
     readonly in_reply_to_status_id_str?: string;
     readonly retweeted_status_result?: { readonly result?: Tweet };
-    readonly entities?: { readonly urls?: ReadonlyArray<Url> };
-    readonly extended_entities?: { readonly media?: ReadonlyArray<unknown> };
+    readonly entities?: { readonly urls?: readonly Url[] };
+    readonly extended_entities?: { readonly media?: Json[] };
     readonly favorite_count?: number;
     readonly reply_count?: number;
     readonly retweet_count?: number;
@@ -49,7 +50,7 @@ interface Content {
   readonly cursorType?: string;
   readonly value?: string;
   readonly itemContent?: { readonly tweet_results?: { readonly result?: Tweet } };
-  readonly items?: ReadonlyArray<{ readonly item: { readonly itemContent?: Content["itemContent"] } }>;
+  readonly items?: readonly { readonly item: { readonly itemContent?: Content["itemContent"] } }[];
 }
 
 interface Entry {
@@ -59,12 +60,12 @@ interface Entry {
 
 interface Instruction {
   readonly type: string;
-  readonly entries?: ReadonlyArray<Entry>;
+  readonly entries?: readonly Entry[];
   readonly entry?: Entry;
 }
 
 interface Instructions {
-  readonly timeline?: { readonly instructions?: ReadonlyArray<Instruction> };
+  readonly timeline?: { readonly instructions?: readonly Instruction[] };
 }
 
 interface Timeline {
@@ -83,7 +84,7 @@ interface Folders {
       readonly user_results: {
         readonly result: {
           readonly bookmark_collections_slice: {
-            readonly items: ReadonlyArray<{ readonly id: string; readonly name: string }>;
+            readonly items: readonly { readonly id: string; readonly name: string }[];
           };
         };
       };
@@ -95,10 +96,21 @@ interface Viewer {
   readonly id: string;
 }
 
-/** Posts with reply limits or other visibility rules come wrapped one level deeper. */
+type Heads = Record<string, readonly string[]>;
+
+type Variables = Record<string, Json | undefined>;
+
+interface RateLimited {
+  readonly status: number;
+  readonly remaining: number;
+  readonly reset: number;
+  readonly retryAfter: number;
+  readonly body: string;
+}
+
 const unwrap = (tweet: Tweet | undefined): Tweet | undefined => tweet?.tweet ?? tweet;
 
-const instructionsOf = (timeline: Timeline): ReadonlyArray<Instruction> =>
+const instructionsOf = (timeline: Timeline): readonly Instruction[] =>
   (
     timeline.data?.bookmark_timeline_v2 ??
     timeline.data?.bookmark_collection_timeline ??
@@ -106,13 +118,13 @@ const instructionsOf = (timeline: Timeline): ReadonlyArray<Instruction> =>
     timeline.data?.user?.result?.timeline
   )?.timeline?.instructions ?? [];
 
-/** Every entry of a page, the pinned post's too. */
-const entriesOf = (timeline: Timeline): ReadonlyArray<Entry> =>
+const entriesOf = (timeline: Timeline): readonly Entry[] =>
   instructionsOf(timeline).flatMap(
-    (instruction) => instruction.entries ?? (instruction.entry === undefined ? [] : [instruction.entry]),
+    (instruction) =>
+      instruction.entries ?? (instruction.entry === undefined ? [] : [instruction.entry]),
   );
 
-const tweetsOf = (entry: Entry): ReadonlyArray<Tweet> =>
+const tweetsOf = (entry: Entry): readonly Tweet[] =>
   (entry.content.items?.map(({ item }) => item.itemContent) ?? [entry.content.itemContent]).flatMap(
     (item) => {
       const tweet = unwrap(item?.tweet_results?.result);
@@ -121,42 +133,56 @@ const tweetsOf = (entry: Entry): ReadonlyArray<Tweet> =>
     },
   );
 
-/** The posts a page added: a pinned post comes in its own instruction, so it never looks like where you left off. */
-const idsOf = (timeline: Timeline): ReadonlyArray<string> =>
+const addedIdsOf = (timeline: Timeline): readonly string[] =>
   instructionsOf(timeline)
-    .flatMap((instruction) => (instruction.type === "TimelineAddEntries" ? (instruction.entries ?? []) : []))
+    .flatMap((instruction) =>
+      instruction.type === "TimelineAddEntries" ? (instruction.entries ?? []) : [],
+    )
     .flatMap((entry) => tweetsOf(entry).map((tweet) => tweet.rest_id ?? ""));
 
-const extraOf = (tweet: Tweet, author: User | undefined) => ({
-  author_name: author?.core?.name ?? author?.legacy?.name ?? null,
-  conversation_id: tweet.legacy?.conversation_id_str ?? null,
-  media: (tweet.legacy?.extended_entities?.media ?? null) as never,
-  metrics: {
-    likes: tweet.legacy?.favorite_count ?? null,
-    replies: tweet.legacy?.reply_count ?? null,
-    retweets: tweet.legacy?.retweet_count ?? null,
-    quotes: tweet.legacy?.quote_count ?? null,
-    bookmarks: tweet.legacy?.bookmark_count ?? null,
-    impressions: tweet.views?.count === undefined ? null : Number(tweet.views.count),
-  },
+const metricsOf = ({ legacy, views }: Tweet) => ({
+  likes: legacy?.favorite_count ?? null,
+  replies: legacy?.reply_count ?? null,
+  retweets: legacy?.retweet_count ?? null,
+  quotes: legacy?.quote_count ?? null,
+  bookmarks: legacy?.bookmark_count ?? null,
+  impressions: views?.count === undefined ? null : Number(views.count),
 });
 
-function* postRows(tweet: Tweet): Generator<Row> {
-  const id = `x:tweet:${tweet.rest_id}`;
-  const author = tweet.core?.user_results?.result;
-  const handle = author?.core?.screen_name ?? author?.legacy?.screen_name ?? null;
-  const note = tweet.note_tweet?.note_tweet_results?.result;
-  const quoted = unwrap(tweet.quoted_status_result?.result);
+const namesOf = (user: User | undefined) => ({
+  handle: user?.core?.screen_name ?? user?.legacy?.screen_name ?? null,
+  name: user?.core?.name ?? user?.legacy?.name ?? null,
+});
 
-  yield thing({
-    id,
+const urlsOf = ({ note_tweet, legacy }: Tweet): readonly Url[] => [
+  ...(note_tweet?.note_tweet_results?.result?.entity_set?.urls ?? []),
+  ...(legacy?.entities?.urls ?? []),
+];
+
+const tweetThing = (tweet: Tweet): Row => {
+  const { handle, name } = namesOf(tweet.core?.user_results?.result);
+
+  return thing({
+    id: `x:tweet:${tweet.rest_id}`,
     kind: "tweet",
-    text: note?.text ?? tweet.legacy?.full_text ?? null,
+    text: tweet.note_tweet?.note_tweet_results?.result?.text ?? tweet.legacy?.full_text ?? null,
     url: handle === null ? null : `https://x.com/${handle}/status/${tweet.rest_id}`,
     author: handle,
     created_at: iso(tweet.legacy?.created_at),
-    extra: extraOf(tweet, author),
+    extra: {
+      author_name: name,
+      conversation_id: tweet.legacy?.conversation_id_str ?? null,
+      media: tweet.legacy?.extended_entities?.media ?? null,
+      metrics: metricsOf(tweet),
+    },
   });
+};
+
+const postRows = function* postRows(tweet: Tweet): Generator<Row> {
+  const id = `x:tweet:${tweet.rest_id}`;
+  const quoted = unwrap(tweet.quoted_status_result?.result);
+
+  yield tweetThing(tweet);
 
   const original = unwrap(tweet.legacy?.retweeted_status_result?.result);
   const related = new Set([id]);
@@ -165,6 +191,7 @@ function* postRows(tweet: Tweet): Generator<Row> {
     related.add(`x:tweet:${tweet.legacy.in_reply_to_status_id_str}`);
     yield link(id, "replies_to", `x:tweet:${tweet.legacy.in_reply_to_status_id_str}`);
   }
+
   for (const [rel, other] of [
     ["quotes", quoted],
     ["reposts", original],
@@ -175,7 +202,8 @@ function* postRows(tweet: Tweet): Generator<Row> {
       yield link(id, rel, `x:tweet:${other.rest_id}`);
     }
   }
-  for (const url of [...(note?.entity_set?.urls ?? []), ...(tweet.legacy?.entities?.urls ?? [])]) {
+
+  for (const url of urlsOf(tweet)) {
     const href = url.expanded_url ?? url.url;
     const target = urlRef(href);
 
@@ -183,29 +211,41 @@ function* postRows(tweet: Tweet): Generator<Row> {
       if (target.kind !== "tweet") {
         yield thing({ ...target, url: href });
       }
+
       yield link(id, "mentions", target.id);
     }
   }
-}
+};
 
 interface Operation {
   readonly queryId: string;
-  readonly features: ReadonlyArray<string>;
-  readonly toggles: ReadonlyArray<string>;
+  readonly features: readonly string[];
+  readonly toggles: readonly string[];
 }
 
 const operation =
-  /queryId:"([^"]+)",operationName:"(\w+)",operationType:"\w+",metadata:\{featureSwitches:\[([^\]]*)\],fieldToggles:\[([^\]]*)\]/g;
-const strings = (list: string) => Array.from(list.matchAll(/"([^"]+)"/g), (match) => match[1] ?? "");
+  /queryId:"(?<queryId>[^"]+)",operationName:"(?<name>\w+)",operationType:"\w+",metadata:\{featureSwitches:\[(?<features>[^\]]*)\],fieldToggles:\[(?<toggles>[^\]]*)\]/gu;
+
+const strings = (list: string) =>
+  Array.from(list.matchAll(/"[^"]+"/gu), ([quoted]) => quoted.slice(1, -1));
+
 const bundles = "https://abs.twimg.com/responsive-web/client-web/";
 
-/** Every GraphQL operation in x.com's current bundles and the web app's bearer token, so nothing goes stale. */
+const bundle = async (file: string): Promise<string> => {
+  const response = await fetch(bundles + file);
+
+  return await response.text();
+};
+
 const discover = async (html: string) => {
   const chunks = (pattern: RegExp) =>
-    new Map(Array.from(html.matchAll(pattern), ([, id, value]) => [id, value]));
-  const names = chunks(/(\d+):"((?:bundle|ondemand|loader|shared~|vendor)[^"]*)"/g);
-  const hashes = chunks(/(\d+):"([0-9a-f]{16})"/g);
-  const main = /client-web\/(main\.[0-9a-f]+\.js)/.exec(html)?.[1];
+    new Map(
+      Array.from(html.matchAll(pattern), ({ groups }) => [groups?.["id"], groups?.["value"]]),
+    );
+
+  const names = chunks(/(?<id>\d+):"(?<value>(?:bundle|ondemand|loader|shared~|vendor)[^"]*)"/gu);
+  const hashes = chunks(/(?<id>\d+):"(?<value>[0-9a-f]{16})"/gu);
+  const main = /client-web\/(?<main>main\.[0-9a-f]+\.js)/u.exec(html)?.groups?.["main"];
 
   if (main === undefined) {
     throw new Error("x: x.com's page names no main bundle, so X has changed how it loads");
@@ -214,76 +254,94 @@ const discover = async (html: string) => {
   const queue = Array.from(names, ([id, name]) =>
     hashes.has(id) ? `${name}.${hashes.get(id)}a.js` : "",
   ).filter((file) => file !== "");
-  const code = [await (await fetch(bundles + main)).text()];
+
+  const code = [await bundle(main)];
+
   await Promise.all(
     Array.from({ length: 16 }, async () => {
       for (let file = queue.shift(); file !== undefined; file = queue.shift()) {
-        code.push(await (await fetch(bundles + file)).text());
+        code.push(await bundle(file));
       }
     }),
   );
 
   return {
-    bearer: /AAAAAAAAAAAAAAAAAAAAA[A-Za-z0-9%]+/.exec(code[0] ?? "")?.[0],
+    bearer: /AAAAAAAAAAAAAAAAAAAAA[A-Za-z0-9%]+/u.exec(code[0] ?? "")?.[0],
     operations: new Map<string, Operation>(
       code.flatMap((js) =>
-        Array.from(js.matchAll(operation), ([, queryId = "", name = "", features = "", toggles = ""]) => [
-          name,
-          { queryId, features: strings(features), toggles: strings(toggles) },
-        ]),
+        Array.from(
+          js.matchAll(operation),
+          ({ groups: { queryId = "", name = "", features = "", toggles = "" } = {} }) => [
+            name,
+            { queryId, features: strings(features), toggles: strings(toggles) },
+          ],
+        ),
       ),
     ),
   };
 };
 
-const agentBrowser = (args: ReadonlyArray<string>, env: Record<string, string | undefined> = process.env) => {
+const agentBrowser = (
+  args: readonly string[],
+  env: Record<string, string | undefined> = process.env,
+) => {
   const run = Bun.spawnSync(["agent-browser", ...args], { env });
 
   if (run.exitCode !== 0) {
-    throw new Error(`x: agent-browser ${args.join(" ").slice(0, 80)}: ${run.stderr.toString().trim()}`);
+    throw new Error(
+      `x: agent-browser ${args.join(" ").slice(0, 80)}: ${run.stderr.toString().trim()}`,
+    );
   }
 
   return run.stdout.toString();
 };
 
-const evaluate = (
-  session: ReadonlyArray<string>,
+// oxlint-disable-next-line typescript/no-unnecessary-type-parameters -- the caller names the JSON it expects, so this one assertion serves every read
+const parsed = <T>(text: string): T => {
+  const value: unknown = JSON.parse(text);
+
+  // SAFETY: x.com or agent-browser sent this text, or this source's own fetch wrote it.
+  return value as T;
+};
+
+interface Evaluated<T> {
+  readonly success: boolean;
+  readonly error?: string;
+  readonly data: { readonly result: T };
+}
+
+// oxlint-disable-next-line typescript/no-unnecessary-type-parameters -- the caller names what its script returns
+const evaluate = <T>(
+  session: readonly string[],
   js: string,
   env?: Record<string, string | undefined>,
-): any => {
-  const out = JSON.parse(
+): T => {
+  const out = parsed<Evaluated<T>>(
     agentBrowser([...session, "eval", "--json", "-b", Buffer.from(js).toString("base64")], env),
   );
 
-  if (out.success !== true) {
+  if (!out.success) {
     throw new Error(`x: ${out.error}`);
   }
 
   return out.data.result;
 };
 
-/** Chrome's own user agent without "Headless", which X turns away, read from a throwaway browser. */
-const userAgent = (): string => {
+const headedUserAgent = (): string => {
   const probe = ["--session", "commonplace-user-agent"];
   agentBrowser([...probe, "open", "about:blank"]);
 
   try {
-    return String(evaluate(probe, "navigator.userAgent")).replace("HeadlessChrome", "Chrome");
+    return evaluate<string>(probe, "navigator.userAgent").replace("HeadlessChrome", "Chrome");
   } finally {
     agentBrowser([...probe, "close"]);
   }
 };
 
 export interface XOptions {
-  /** The agent-browser session that's signed in to X. */
   readonly session?: string;
 }
 
-/**
- * Your X bookmarks with their folders, likes, posts and replies, read the way x.com's own web app reads them:
- * GraphQL requests sent from inside agent-browser's signed-in session on this machine. Each run keeps the pages
- * as they came and stops at a post the last run already had.
- */
 export const x = ({ session = "x" }: XOptions = {}) => {
   const signin = `agent-browser --session ${session} --restore --headed open https://x.com/login`;
 
@@ -296,24 +354,28 @@ export const x = ({ session = "x" }: XOptions = {}) => {
       }
 
       const signedIn = ["--session", session, "--restore"];
-      const env = { ...process.env, AGENT_BROWSER_USER_AGENT: userAgent() };
+      const env = { ...process.env, AGENT_BROWSER_USER_AGENT: headedUserAgent() };
 
       try {
         agentBrowser([...signedIn, "open", "https://x.com/i/bookmarks"], env);
-        const { cookie, html } = evaluate(
+
+        const { cookie, html } = evaluate<{ cookie: string; html: string }>(
           signedIn,
           "({ cookie: document.cookie, html: document.documentElement.outerHTML })",
           env,
         );
-        const viewer = /(?:^|; )twid=u%3D(\d+)/.exec(cookie)?.[1];
+
+        const viewer = /(?:^|; )twid=u%3D(?<id>\d+)/u.exec(cookie)?.groups?.["id"];
 
         if (viewer === undefined) {
-          throw new Error(`x: the agent-browser session isn't signed in to X. Sign in once with: ${signin}`);
+          throw new Error(
+            `x: the agent-browser session isn't signed in to X. Sign in once with: ${signin}`,
+          );
         }
 
         const { bearer, operations } = await discover(html);
 
-        const graphql = async (name: string, variables: Record<string, unknown>): Promise<string> => {
+        const graphql = async (name: string, variables: Variables): Promise<string> => {
           const op = operations.get(name);
 
           if (op === undefined) {
@@ -325,11 +387,13 @@ export const x = ({ session = "x" }: XOptions = {}) => {
             features: JSON.stringify(Object.fromEntries(op.features.map((key) => [key, true]))),
             fieldToggles: JSON.stringify(Object.fromEntries(op.toggles.map((key) => [key, false]))),
           });
+
           const request = {
             url: `https://x.com/i/api/graphql/${op.queryId}/${name}?${params.toString()}`,
             bearer,
           };
-          const { status, remaining, reset, retryAfter, body } = evaluate(
+
+          const { status, remaining, reset, retryAfter, body } = evaluate<RateLimited>(
             signedIn,
             `(async ({ url, bearer }) => {
               const csrf = document.cookie.match(/(?:^|; )ct0=([^;]+)/)?.[1];
@@ -343,25 +407,30 @@ export const x = ({ session = "x" }: XOptions = {}) => {
             })(${JSON.stringify(request)})`,
             env,
           );
+
           const until = Number.isFinite(retryAfter) ? Date.now() + retryAfter * 1000 : reset * 1000;
 
           if (status === 429 && Number.isFinite(until)) {
             console.error(`x ${name}: rate limited until ${new Date(until).toISOString()}`);
             await Bun.sleep(until - Date.now());
 
-            return graphql(name, variables);
+            return await graphql(name, variables);
           }
+
           if (status !== 200) {
             throw new Error(`x ${name} ${status}: ${body.slice(0, 300)}`);
           }
 
-          const { errors } = JSON.parse(body);
+          const { errors } = parsed<{ errors?: Json[] }>(body);
 
-          if (errors?.length > 0) {
+          if (errors !== undefined && errors.length > 0) {
             throw new Error(`x ${name}: ${JSON.stringify(errors).slice(0, 300)}`);
           }
+
           if (remaining === 0) {
-            console.error(`x ${name}: out of requests until ${new Date(reset * 1000).toISOString()}`);
+            console.error(
+              `x ${name}: out of requests until ${new Date(reset * 1000).toISOString()}`,
+            );
             await Bun.sleep(reset * 1000 - Date.now());
           }
 
@@ -369,35 +438,44 @@ export const x = ({ session = "x" }: XOptions = {}) => {
         };
 
         const heads = `${state}/heads.json`;
-        const known: Record<string, ReadonlyArray<string>> = since !== null && existsSync(heads)
-          ? JSON.parse(readFileSync(heads, "utf8"))
-          : {};
-        const next: Record<string, ReadonlyArray<string>> = {};
 
-        /** Follows the Bottom cursor until a page brings nothing new or holds a post the last run had. */
-        const save = async (file: string, name: string, variables: Record<string, unknown>) => {
-          const last = new Set(known[file] ?? []);
-          const pages: Array<string> = [];
+        const known: Heads =
+          since !== null && existsSync(heads) ? parsed<Heads>(readFileSync(heads, "utf-8")) : {};
+
+        const next: Heads = {};
+
+        const save = async (file: string, name: string, variables: Variables) => {
+          const last = new Set(known[file]);
+          const pages: string[] = [];
           const seen = new Set<string>();
 
           for (let cursor: string | undefined; ;) {
             const page = await graphql(name, { ...variables, cursor });
-            const timeline = JSON.parse(page) as Timeline;
+            const timeline = parsed<Timeline>(page);
             const entries = entriesOf(timeline);
+
             const fresh = entries.filter(
               (e) => e.content.entryType !== "TimelineTimelineCursor" && !seen.has(e.entryId),
             );
 
             pages.push(page);
-            fresh.forEach((entry) => seen.add(entry.entryId));
+
+            for (const entry of fresh) {
+              seen.add(entry.entryId);
+            }
+
             cursor = entries.find((entry) => entry.content.cursorType === "Bottom")?.content.value;
 
-            if (fresh.length === 0 || cursor === undefined || idsOf(timeline).some((id) => last.has(id))) {
+            if (
+              fresh.length === 0 ||
+              cursor === undefined ||
+              addedIdsOf(timeline).some((id) => last.has(id))
+            ) {
               break;
             }
           }
 
-          const ids = pages.flatMap((page) => idsOf(JSON.parse(page) as Timeline));
+          const ids = pages.flatMap((page) => addedIdsOf(parsed<Timeline>(page)));
           next[file] = ids.length > 0 ? ids.slice(0, 20) : [...last];
           writeFileSync(`${dir}/${file}.jsonl`, pages.map((page) => `${page}\n`).join(""));
         };
@@ -408,7 +486,8 @@ export const x = ({ session = "x" }: XOptions = {}) => {
         const folders = await graphql("BookmarkFoldersSlice", {});
         writeFileSync(`${dir}/folders.json`, folders);
         mkdirSync(`${dir}/folders`);
-        for (const { id } of (JSON.parse(folders) as Folders).data.viewer.user_results.result
+
+        for (const { id } of parsed<Folders>(folders).data.viewer.user_results.result
           .bookmark_collections_slice.items) {
           await save(`folders/${id}`, "BookmarkFolderTimeline", {
             bookmark_collection_id: id,
@@ -416,9 +495,22 @@ export const x = ({ session = "x" }: XOptions = {}) => {
           });
         }
 
-        const profile = { userId: viewer, count: 100, includePromotedContent: false, withVoice: true };
-        await save("likes", "Likes", { ...profile, withClientEventToken: false, withBirdwatchNotes: false });
-        await save("posts", "UserTweets", { ...profile, withQuickPromoteEligibilityTweetFields: true });
+        const profile = {
+          userId: viewer,
+          count: 100,
+          includePromotedContent: false,
+          withVoice: true,
+        };
+
+        await save("likes", "Likes", {
+          ...profile,
+          withClientEventToken: false,
+          withBirdwatchNotes: false,
+        });
+        await save("posts", "UserTweets", {
+          ...profile,
+          withQuickPromoteEligibilityTweetFields: true,
+        });
         await save("replies", "UserRepliesTimeline", { ...profile, withCommunity: true });
 
         mkdirSync(state, { recursive: true });
@@ -428,36 +520,51 @@ export const x = ({ session = "x" }: XOptions = {}) => {
       }
     },
 
-    rows: async function* ({ dir }) {
+    async *rows({ dir }) {
       const viewer = await json<Viewer>(`${dir}/viewer.json`);
+
       const folders = existsSync(`${dir}/folders.json`)
-        ? (await json<Folders>(`${dir}/folders.json`)).data.viewer.user_results.result
-            .bookmark_collections_slice.items
-        : [];
-      const files = [
-        { file: "bookmarks", collections: ["x bookmarks"] },
-        ...folders.map(({ id, name }) => ({ file: `folders/${id}`, collections: ["x bookmarks", name] })),
-        { file: "likes", collections: [] },
-        { file: "posts", collections: [] },
-        { file: "replies", collections: [] },
+        ? await json<Folders>(`${dir}/folders.json`)
+        : null;
+
+      const files: readonly {
+        file: string;
+        verb: "saved" | "liked" | "posted";
+        collections: string[];
+      }[] = [
+        { file: "bookmarks", verb: "saved", collections: ["x bookmarks"] },
+        ...(folders?.data.viewer.user_results.result.bookmark_collections_slice.items ?? []).map(
+          ({ id, name }) => ({
+            file: `folders/${id}`,
+            verb: "saved" as const,
+            collections: ["x bookmarks", name],
+          }),
+        ),
+        { file: "likes", verb: "liked", collections: [] },
+        { file: "posts", verb: "posted", collections: [] },
+        { file: "replies", verb: "posted", collections: [] },
       ];
 
-      for (const { file, collections } of files) {
-        for await (const line of existsSync(`${dir}/${file}.jsonl`) ? lines(`${dir}/${file}.jsonl`) : []) {
-          for (const entry of entriesOf(JSON.parse(line) as Timeline)) {
+      for (const { file, verb, collections } of files) {
+        for await (const line of existsSync(`${dir}/${file}.jsonl`)
+          ? lines(`${dir}/${file}.jsonl`)
+          : []) {
+          for (const entry of entriesOf(parsed<Timeline>(line))) {
             for (const tweet of tweetsOf(entry)) {
               const id = `x:tweet:${tweet.rest_id}`;
               const mine = tweet.core?.user_results?.result?.rest_id === viewer.id;
 
-              if ((file === "posts" || file === "replies") && !mine) {
+              if (verb === "posted" && !mine) {
                 continue;
               }
+
               yield* postRows(tweet);
-              yield file === "likes"
-                ? event({ verb: "liked", thing: id })
-                : file === "posts" || file === "replies"
-                  ? event({ verb: "posted", thing: id, ts: iso(tweet.legacy?.created_at) })
-                  : event({ verb: "saved", thing: id, collections });
+              yield event({
+                verb,
+                thing: id,
+                ts: verb === "posted" ? iso(tweet.legacy?.created_at) : null,
+                collections,
+              });
             }
           }
         }

@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 import { Database } from "bun:sqlite";
 import { existsSync, statSync } from "node:fs";
-import { dirname } from "node:path";
+import path from "node:path";
 import { parseArgs } from "node:util";
 
 import config from "../commonplace.config.ts";
@@ -9,7 +9,8 @@ import pkg from "../package.json";
 import { build, paths, report } from "./build.ts";
 import { install } from "./install.ts";
 import { serve } from "./mcp.ts";
-import { type Hit, open } from "./store.ts";
+import { open } from "./store.ts";
+import type { Hit, Store } from "./store.ts";
 import { sync } from "./sync.ts";
 
 const usage = `commonplace: your personal data kit for agents
@@ -28,7 +29,7 @@ const usage = `commonplace: your personal data kit for agents
   --json      machine-readable output
   --limit n   how many results`;
 
-const root = dirname(import.meta.dir);
+const root = path.dirname(import.meta.dir);
 const data = process.env["COMMONPLACE_DATA"] ?? `${root}/data`;
 const { db } = paths(data);
 
@@ -52,22 +53,24 @@ const fail = (message: string): never => {
   process.exit(1);
 };
 
-const archive = (): string => (existsSync(db) ? db : fail("No archive yet. Run `commonplace sync` first."));
+const archive = (): string =>
+  existsSync(db) ? db : fail("No archive yet. Run `commonplace sync` first.");
 
 const store = () => open(archive());
 
-const lines = (hits: ReadonlyArray<Hit>): string =>
+const lines = (hits: readonly Hit[]): string =>
   hits
     .map((hit) =>
       [
         `${(hit.at ?? "").slice(0, 10).padEnd(10)}  ${hit.what.padEnd(10)}  ${hit.id}${hit.title === null ? "" : `  (${hit.title})`}`,
-        ...(hit.text === null ? [] : [`            ${hit.text.replaceAll(/\s+/g, " ")}`]),
+        ...(hit.text === null ? [] : [`            ${hit.text.replaceAll(/\s+/gu, " ")}`]),
       ].join("\n"),
     )
     .join("\n");
 
-const print = (value: unknown, text: () => string) =>
+const print = (value: ReturnType<Store["search"] | Store["stats"]>, text: () => string) => {
   console.log(values.json === true ? JSON.stringify(value, null, 1) : text());
+};
 
 switch (values.help === true ? "help" : (command ?? "help")) {
   case "search": {
@@ -75,16 +78,19 @@ switch (values.help === true ? "help" : (command ?? "help")) {
     print(hits, () => lines(hits));
     break;
   }
+
   case "timeline": {
     const hits = store().timeline({ ...values, limit });
     print(hits, () => lines(hits));
     break;
   }
+
   case "show": {
     const record = store().show(rest[0] ?? fail("Usage: commonplace show <id>"));
     console.log(JSON.stringify(record ?? fail(`No record with id ${rest[0]}`), null, 1));
     break;
   }
+
   case "stats": {
     const stats = store().stats();
     print(stats, () =>
@@ -99,52 +105,67 @@ switch (values.help === true ? "help" : (command ?? "help")) {
     );
     break;
   }
+
   case "sync": {
-    const synced = await sync(config, data, (line) => console.error(`${new Date().toISOString()} ${line}`));
+    const synced = await sync(config, data, (line) => {
+      console.error(`${new Date().toISOString()} ${line}`);
+    });
+
     if (synced === null) {
       console.error("Another sync is running.");
       break;
     }
-    console.log(
-      synced.built !== null
-        ? report(synced.built)
-        : synced.failed.length > 0
-          ? `Nothing new. Failed: ${synced.failed.map((f) => f.source).join(", ")}`
-          : "Every source is up to date for today.",
-    );
-    process.exit(synced.failed.length > 0 || synced.built?.outcomes.some((o) => o.error !== null) ? 1 : 0);
+
+    const failed = synced.failed.map((f) => f.source).join(", ");
+    const broken = synced.built?.outcomes.some((o) => o.error !== null) ?? false;
+
+    const quiet =
+      failed === "" ? "Every source is up to date for today." : `Nothing new. Failed: ${failed}`;
+
+    console.log(synced.built === null ? quiet : report(synced.built));
+    process.exit(failed === "" && !broken ? 0 : 1);
   }
+
   case "build": {
     const built = await build(config, data);
     console.log(report(built));
     process.exitCode = built.outcomes.some((o) => o.error !== null) ? 1 : 0;
     break;
   }
-  case "install":
+
+  case "install": {
     console.log(await install(config, root, data));
     break;
+  }
+
   case "mcp": {
     let current = { store: store(), at: statSync(db).mtimeMs };
-    // A sync renames a new database over the old one, so a long-lived server reopens it.
     await serve(() => {
       const at = statSync(db).mtimeMs;
+
       if (at !== current.at) {
         current.store.close();
         current = { store: store(), at };
       }
+
       return current.store;
     }, pkg.version);
     break;
   }
+
   case "sql": {
     const rows = new Database(archive(), { readonly: true }).query(rest.join(" ")).all();
     console.log(JSON.stringify(rows, null, 1));
     break;
   }
-  case "root":
+
+  case "root": {
     console.log(root);
     break;
-  default:
+  }
+
+  default: {
     console.log(usage);
     process.exitCode = command === undefined || values.help === true ? 0 : 1;
+  }
 }

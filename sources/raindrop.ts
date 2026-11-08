@@ -20,14 +20,9 @@ const columns = [
 const orNull = (value: string | undefined): string | null =>
   value === undefined || value === "" ? null : value;
 
-/**
- * Your Raindrop.io bookmarks, from the CSV export (Settings → Backups, or Export in any collection) dropped
- * into the snapshot. Folders become collections ("Unsorted" is Raindrop's name for none); tags, highlights
- * and favorites ride along on the save.
- */
 export default defineSource({
   name: "raindrop",
-  rows: function* ({ dir }) {
+  *rows({ dir }) {
     for (const name of readdirSync(dir)
       .filter((file) => file.endsWith(".csv"))
       .toSorted()) {
@@ -61,7 +56,9 @@ export default defineSource({
           ts: created,
           text: orNull(bookmark["note"]),
           collections:
-            bookmark["folder"] === "Unsorted" || bookmark["folder"] === undefined ? [] : [bookmark["folder"]],
+            bookmark["folder"] === "Unsorted" || bookmark["folder"] === undefined
+              ? []
+              : [bookmark["folder"]],
           extra: {
             raindrop_id: bookmark["id"] ?? null,
             tags: (bookmark["tags"] ?? "")

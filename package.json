@@ -9,14 +9,19 @@
   },
   "type": "module",
   "scripts": {
-    "check": "tsc -p . && oxlint --type-aware && oxfmt --check && bun test",
-    "fix": "oxlint --type-aware --fix && oxfmt"
+    "check": "oxlint && oxfmt --check && tsc && bun test",
+    "fix": "oxlint --fix; oxfmt",
+    "prepare": "lefthook install"
   },
   "devDependencies": {
-    "@types/bun": "1.4.2",
-    "oxfmt": "0.72.0",
-    "oxlint": "1.87.0",
-    "oxlint-tsgolint": "7.0.2003",
-    "typescript": "7.0.2"
-  }
+    "@oxlint/plugins": "1.91.0",
+    "@types/bun": "1.4.4",
+    "lefthook": "2.2.2",
+    "oxfmt": "0.76.0",
+    "oxlint": "1.91.0",
+    "oxlint-tsgolint": "7.0.2006",
+    "typescript": "7.0.2",
+    "ultracite": "8.1.1"
+  },
+  "packageManager": "bun@1.4.3"
 }

@@ -1,8 +1,9 @@
 import { statSync } from "node:fs";
 import { homedir } from "node:os";
-import { basename } from "node:path";
+import path from "node:path";
 
 import { event, iso, thing } from "../src/schema.ts";
+import type { Extra } from "../src/schema.ts";
 import { defineSource, jsonl, lines, writeJsonl } from "../src/source.ts";
 
 export interface Prompt {
@@ -13,11 +14,9 @@ export interface Prompt {
   readonly project: string | null;
   readonly model: string | null;
   readonly text: string;
-  /** For a message that came in through a chat app (Telegram, Discord, …): which channel, and who sent it. */
   readonly channel: { readonly source: string; readonly user: string | null } | null;
 }
 
-/** Text the agent harness puts in the user's turn. None of it was typed by you. */
 const injected = [
   "<command-name>",
   "<command-message>",
@@ -55,103 +54,175 @@ const injectedByPi = [
   "Ran `",
 ];
 
-const typed = (text: string, also: ReadonlyArray<string> = []): boolean =>
+const typed = (text: string, also: readonly string[] = []): boolean =>
   text !== "" && ![...injected, ...also].some((prefix) => text.startsWith(prefix));
 
-type Part = { readonly type?: string; readonly text?: string };
+interface Part {
+  readonly type?: string;
+  readonly text?: string;
+}
 
-const textOf = (content: unknown, types: ReadonlyArray<string>): string | null =>
-  typeof content === "string"
-    ? content
-    : Array.isArray(content) && !content.some((part: Part) => part.type === "tool_result")
-      ? content
-          .filter((part: Part) => types.includes(part.type ?? "") && typeof part.text === "string")
-          .map((part: Part) => part.text)
-          .join("\n")
-      : null;
+type Content = string | readonly Part[];
 
-const parse = (line: string): Record<string, any> | null => {
+interface Entry {
+  readonly type?: string;
+  readonly timestamp?: string;
+  readonly id?: string;
+  readonly sessionId?: string;
+  readonly cwd?: string;
+  readonly isSidechain?: boolean;
+  readonly isMeta?: boolean;
+  readonly entrypoint?: string;
+  readonly origin?: { readonly kind?: string };
+  readonly message?: {
+    readonly role?: string;
+    readonly model?: string;
+    readonly content?: Content;
+  };
+  readonly payload?: {
+    readonly type?: string;
+    readonly role?: string;
+    readonly id?: string;
+    readonly cwd?: string;
+    readonly model?: string;
+    readonly source?: unknown;
+    readonly thread_source?: unknown;
+    readonly message?: Content;
+    readonly content?: Content;
+  };
+}
+
+const isSubagent = (origin: unknown): origin is { readonly subagent: unknown } =>
+  typeof origin === "object" && origin !== null && "subagent" in origin;
+
+const isParts = (content: Content | undefined): content is readonly Part[] =>
+  Array.isArray(content);
+
+const textOf = (content: Content | undefined, types: readonly string[]): string | null => {
+  if (!isParts(content)) {
+    return content ?? null;
+  }
+
+  if (content.some((part) => part.type === "tool_result")) {
+    return null;
+  }
+
+  return content
+    .flatMap((part) =>
+      types.includes(part.type ?? "") && part.text !== undefined ? [part.text] : [],
+    )
+    .join("\n");
+};
+
+const parse = (line: string): Entry | null => {
   try {
-    return JSON.parse(line);
+    // SAFETY: every field of Entry is optional, and each read below allows for a log that lacks it.
+    return JSON.parse(line) as Entry;
   } catch {
     return null;
   }
 };
 
-/** Session logs untouched since the last snapshot can't hold new prompts. */
-const touched = async (dir: string, pattern: string, since: string | null): Promise<Array<string>> => {
-  const files = await Array.fromAsync(new Bun.Glob(pattern).scan({ cwd: dir, absolute: true })).catch(
-    () => [],
-  );
+const touched = async (dir: string, pattern: string, since: string | null): Promise<string[]> => {
+  const files = await Array.fromAsync(
+    new Bun.Glob(pattern).scan({ cwd: dir, absolute: true }),
+  ).catch(() => []);
 
   return files
     .filter((file) => since === null || statSync(file).mtime.toLocaleDateString("sv") >= since)
     .toSorted();
 };
 
-const projectOf = (cwd: string | null): string | null =>
-  cwd === null ? null : cwd === homedir() ? "~" : basename(cwd) || cwd;
+const projectOf = (cwd: string | null): string | null => {
+  if (cwd === null) {
+    return null;
+  }
 
-const channelBlock = /<channel source="([^"]+)"([^>]*)>\n?([\s\S]*?)\n?<\/channel>/g;
+  if (cwd === homedir()) {
+    return "~";
+  }
 
-/** A chat-app message (Telegram, Discord, …) arrives wrapped in `<channel …>`, sometimes several to a turn. */
+  return path.basename(cwd) || cwd;
+};
+
+const channelBlock =
+  /<channel source="(?<source>[^"]+)"(?<attributes>[^>]*)>\n?(?<inner>[\s\S]*?)\n?<\/channel>/gu;
+
 const channelMessages = (text: string) =>
   text.startsWith("<channel source=")
-    ? [...text.matchAll(channelBlock)].map(([, source = "", attributes = "", inner = ""]) => ({
-        channel: { source, user: /\buser="([^"]*)"/.exec(attributes)?.[1] ?? null },
-        text: inner.trim(),
-      }))
+    ? Array.from(
+        text.matchAll(channelBlock),
+        ({ groups: { source = "", attributes = "", inner = "" } = {} }) => ({
+          channel: {
+            source,
+            user: /\buser="(?<user>[^"]*)"/u.exec(attributes)?.groups?.["user"] ?? null,
+          },
+          text: inner.trim(),
+        }),
+      )
     : null;
 
-/** Claude Code: what a person sent, not what the harness, a subagent, `claude -p` or a plugin did. */
-async function* claude(since: string | null): AsyncGenerator<Prompt> {
+const claudeTurn = (entry: Entry, file: string): Omit<Prompt, "model">[] => {
+  const raw = entry.type === "user" ? textOf(entry.message?.content, ["text"])?.trim() : undefined;
+
+  const origin = entry.origin?.kind;
+  const ts = entry.timestamp;
+
+  const typedHere =
+    entry.isMeta !== true &&
+    (origin === undefined ? entry.entrypoint !== "sdk-cli" : origin === "human");
+
+  if (
+    raw === undefined ||
+    raw === null ||
+    ts === undefined ||
+    !(origin === undefined || origin === "channel" || typedHere)
+  ) {
+    return [];
+  }
+
+  const messages = channelMessages(raw) ?? (typedHere ? [{ channel: null, text: raw }] : []);
+  const cwd = entry.cwd ?? null;
+
+  return messages.flatMap((message) =>
+    typed(message.text)
+      ? [
+          {
+            agent: "claude" as const,
+            session: entry.sessionId ?? path.basename(file, ".jsonl"),
+            ts,
+            cwd,
+            project: projectOf(cwd),
+            ...message,
+          },
+        ]
+      : [],
+  );
+};
+
+const claude = async function* claude(since: string | null): AsyncGenerator<Prompt> {
   const dir = `${process.env["CLAUDE_CONFIG_DIR"] ?? `${homedir()}/.claude`}/projects`;
 
   for (const file of await touched(dir, "*/*.jsonl", since)) {
-    const pending: Array<Omit<Prompt, "model">> = [];
+    const pending: Omit<Prompt, "model">[] = [];
     let model: string | null = null;
 
     for await (const line of lines(file)) {
       const entry = parse(line);
+      const said = entry?.message?.model;
 
-      if (entry === null || entry["isSidechain"] === true) {
+      if (entry === null || entry.isSidechain === true) {
         continue;
       }
 
-      const said = entry["message"]?.model;
-
-      if (entry["type"] === "assistant" && typeof said === "string" && said !== "<synthetic>") {
+      if (entry.type === "assistant" && said !== undefined && said !== "<synthetic>") {
         model = said;
+
         for (const prompt of pending.splice(0)) {
           yield { ...prompt, model };
         }
-        continue;
-      }
-
-      const raw = entry["type"] === "user" ? textOf(entry["message"]?.content, ["text"])?.trim() : undefined;
-
-      if (raw === undefined || raw === null) {
-        continue;
-      }
-
-      const origin = entry["origin"]?.kind;
-      const typedHere =
-        entry["isMeta"] !== true &&
-        (origin === undefined ? entry["entrypoint"] !== "sdk-cli" : origin === "human");
-      const messages = channelMessages(raw) ?? (typedHere ? [{ channel: null, text: raw }] : []);
-      const cwd = entry["cwd"] ?? null;
-
-      for (const message of origin === undefined || origin === "channel" || typedHere ? messages : []) {
-        if (typed(message.text)) {
-          pending.push({
-            agent: "claude",
-            session: entry["sessionId"],
-            ts: entry["timestamp"],
-            cwd,
-            project: projectOf(cwd),
-            ...message,
-          });
-        }
+      } else {
+        pending.push(...claudeTurn(entry, file));
       }
     }
 
@@ -159,60 +230,58 @@ async function* claude(since: string | null): AsyncGenerator<Prompt> {
       yield { ...prompt, model };
     }
   }
-}
+};
 
-/** Codex: your turns in every session except `codex exec` scripts and the subagent threads Codex starts for itself. */
-async function* codex(since: string | null): AsyncGenerator<Prompt> {
+const codex = async function* codex(since: string | null): AsyncGenerator<Prompt> {
   const home = process.env["CODEX_HOME"] ?? `${homedir()}/.codex`;
+
   const files = [
     ...(await touched(`${home}/sessions`, "**/*.jsonl", since)),
     ...(await touched(`${home}/archived_sessions`, "**/*.jsonl", since)),
   ];
 
   for (const file of files) {
-    const entries = (await Array.fromAsync(lines(file))).map(parse);
-    const meta = entries.find((e) => e?.["type"] === "session_meta")?.["payload"];
+    const entries = await Array.fromAsync(lines(file), parse);
+    const meta = entries.find((e) => e?.type === "session_meta")?.payload;
     const origin = meta?.source ?? meta?.thread_source;
 
-    if (
-      meta === undefined ||
-      origin === "exec" ||
-      (typeof origin === "object" && origin !== null && "subagent" in origin)
-    ) {
+    if (meta === undefined || origin === "exec" || isSubagent(origin)) {
       continue;
     }
 
     const models = entries.map((e) =>
-      e?.["type"] === "turn_context" ? (e["payload"]?.model ?? null) : null,
+      e?.type === "turn_context" ? (e.payload?.model ?? null) : null,
     );
+
     const modelAfter = (i: number): string | null =>
       models.slice(i).find((m) => m !== null) ?? models.findLast((m) => m !== null) ?? null;
+
     const events = entries.flatMap((e, i) =>
-      e?.["type"] === "event_msg" && e["payload"]?.type === "user_message" ? [[e, i] as const] : [],
+      e?.type === "event_msg" && e.payload?.type === "user_message"
+        ? [{ i, ts: e.timestamp, text: textOf(e.payload.message, ["input_text", "text"]) }]
+        : [],
     );
+
     const turns =
       events.length > 0
-        ? events.map(([e, i]) => ({
-            i,
-            ts: e["timestamp"],
-            text: textOf(e["payload"].message, ["input_text", "text"]),
-          }))
+        ? events
         : entries.flatMap((e, i) =>
-            e?.["type"] === "response_item" &&
-            e["payload"]?.type === "message" &&
-            e["payload"].role === "user"
-              ? [{ i, ts: e["timestamp"], text: textOf(e["payload"].content, ["input_text", "text"]) }]
+            e?.type === "response_item" &&
+            e.payload?.type === "message" &&
+            e.payload.role === "user"
+              ? [{ i, ts: e.timestamp, text: textOf(e.payload.content, ["input_text", "text"]) }]
               : [],
           );
 
     for (const { i, ts, text } of turns) {
       const trimmed = text?.trim() ?? "";
 
-      if (typed(trimmed)) {
+      if (ts !== undefined && typed(trimmed)) {
         const cwd = meta.cwd ?? null;
+
         yield {
           agent: "codex",
-          session: meta.id,
+          session: meta.id ?? path.basename(file, ".jsonl"),
           ts,
           cwd,
           project: projectOf(cwd),
@@ -223,31 +292,36 @@ async function* codex(since: string | null): AsyncGenerator<Prompt> {
       }
     }
   }
-}
+};
 
-/** Pi: your turns in every session. */
-async function* pi(since: string | null): AsyncGenerator<Prompt> {
+const pi = async function* pi(since: string | null): AsyncGenerator<Prompt> {
   const home = process.env["PI_CODING_AGENT_DIR"] ?? `${homedir()}/.pi/agent`;
 
   for (const file of await touched(`${home}/sessions`, "*/*.jsonl", since)) {
-    const entries = (await Array.fromAsync(lines(file))).map(parse);
-    const session = entries.find((e) => e?.["type"] === "session");
+    const entries = await Array.fromAsync(lines(file), parse);
+    const session = entries.find((e) => e?.type === "session");
+
     const replies = entries.map((e) =>
-      e?.["type"] === "message" && e["message"]?.role === "assistant" ? (e["message"].model ?? null) : null,
+      e?.type === "message" && e.message?.role === "assistant" ? (e.message.model ?? null) : null,
     );
 
     for (const [i, e] of entries.entries()) {
       const text =
-        e?.["type"] === "message" && e["message"]?.role === "user"
-          ? (textOf(e["message"].content, ["text"])?.trim() ?? "")
+        e?.type === "message" && e.message?.role === "user"
+          ? (textOf(e.message.content, ["text"])?.trim() ?? "")
           : "";
 
-      if (typed(text, injectedByPi) && !text.slice(0, 600).includes("References are relative to ")) {
-        const cwd = session?.["cwd"] ?? null;
+      if (
+        e?.timestamp !== undefined &&
+        typed(text, injectedByPi) &&
+        !text.slice(0, 600).includes("References are relative to ")
+      ) {
+        const cwd = session?.cwd ?? null;
+
         yield {
           agent: "pi",
-          session: session?.["id"] ?? basename(file, ".jsonl"),
-          ts: e?.["timestamp"],
+          session: session?.id ?? path.basename(file, ".jsonl"),
+          ts: e.timestamp,
           cwd,
           project: projectOf(cwd),
           model: replies.slice(i).find((m) => m !== null) ?? null,
@@ -257,27 +331,29 @@ async function* pi(since: string | null): AsyncGenerator<Prompt> {
       }
     }
   }
-}
+};
 
-/** Every prompt on this machine since `since`, oldest first. */
-const scan = async (since: string | null): Promise<Array<Prompt>> =>
+const scan = async (since: string | null): Promise<Prompt[]> =>
   [
     ...(await Array.fromAsync(claude(since))),
     ...(await Array.fromAsync(codex(since))),
     ...(await Array.fromAsync(pi(since))),
   ]
-    .filter((p) => typeof p.ts === "string" && (since === null || p.ts >= since))
+    .filter((p) => since === null || p.ts >= since)
     .toSorted((a, b) => a.ts.localeCompare(b.ts));
 
 if (import.meta.main) {
-  for (const prompt of await scan(process.env["COMMONPLACE_SINCE"] || null)) {
+  const since = process.env["COMMONPLACE_SINCE"] ?? "";
+
+  for (const prompt of await scan(since === "" ? null : since)) {
     process.stdout.write(`${JSON.stringify(prompt)}\n`);
   }
 }
 
-/** The same scan on another machine over ssh: this file is bundled and run there with its own Bun. */
-const scanOver = async (host: string, since: string | null): Promise<Array<Prompt>> => {
-  const [bundle] = (await Bun.build({ entrypoints: [import.meta.path], target: "bun" })).outputs;
+const scanOver = async (host: string, since: string | null): Promise<Prompt[]> => {
+  const build = await Bun.build({ entrypoints: [import.meta.path], target: "bun" });
+  const [bundle] = build.outputs;
+
   const ssh = Bun.spawn(
     ["ssh", "-o", "BatchMode=yes", host, `env COMMONPLACE_SINCE=${since ?? ""} bun run -`],
     {
@@ -286,6 +362,7 @@ const scanOver = async (host: string, since: string | null): Promise<Array<Promp
       stderr: "pipe",
     },
   );
+
   const [out, err, code] = await Promise.all([
     new Response(ssh.stdout).text(),
     new Response(ssh.stderr).text(),
@@ -299,10 +376,14 @@ const scanOver = async (host: string, since: string | null): Promise<Array<Promp
   return out
     .split("\n")
     .filter((line) => line !== "")
-    .map((line) => JSON.parse(line) as Prompt);
+    .map((line) => {
+      const prompt: unknown = JSON.parse(line);
+
+      // SAFETY: the remote ran this file's own scan, which prints one Prompt per line.
+      return prompt as Prompt;
+    });
 };
 
-/** What older snapshots hold: prompt-picker's lines, or the first `{ agent: "claude-code" }` ones. */
 interface Legacy {
   readonly source?: Prompt["agent"];
   readonly sessionId?: string;
@@ -318,34 +399,30 @@ interface Legacy {
 }
 
 export interface PromptsOptions {
-  /** Read another machine's sessions over ssh (`user@host`, needs Bun there). Names the source `prompts-<host>`. */
   readonly ssh?: string;
 }
 
-/**
- * Every prompt you typed into Claude Code, Codex and Pi, and sent them from chat apps, read from their
- * session logs. A chat message keeps who sent it in `extra.from`, so `redact` can keep out the ones
- * your own bots and relays send.
- */
 export const prompts = ({ ssh }: PromptsOptions = {}) =>
   defineSource({
-    name: ssh === undefined ? "prompts" : `prompts-${ssh.replace(/^.*@/, "")}`,
+    name: ssh === undefined ? "prompts" : `prompts-${ssh.replace(/^.*@/u, "")}`,
 
-    /** Starts a day before the last snapshot so no timezone can open a gap; repeats merge away by ID. */
     fetch: async ({ dir, since }) => {
-      const from =
+      const dayBeforeSince =
         since === null ? null : new Date(Date.parse(since) - 86_400_000).toISOString().slice(0, 10);
+
       await writeJsonl(
         `${dir}/prompts.jsonl`,
-        ssh === undefined ? await scan(from) : await scanOver(ssh, from),
+        ssh === undefined ? await scan(dayBeforeSince) : await scanOver(ssh, dayBeforeSince),
       );
     },
 
-    rows: async function* ({ dir }) {
+    async *rows({ dir }) {
       const seen = new Set<string>();
 
       for await (const line of jsonl<Legacy>(`${dir}/prompts.jsonl`)) {
-        const agent = line.source ?? (line.agent === "claude-code" ? "claude" : (line.agent ?? "claude"));
+        const agent =
+          line.source ?? (line.agent === "claude-code" ? "claude" : (line.agent ?? "claude"));
+
         const id = `session:${agent}:${line.sessionId ?? line.session}`;
 
         if (!seen.has(id)) {
@@ -353,9 +430,20 @@ export const prompts = ({ ssh }: PromptsOptions = {}) =>
           yield thing({
             id,
             kind: "session",
-            title: line.project ?? (line.cwd === null ? null : basename(line.cwd)),
+            title: line.project ?? (line.cwd === null ? null : path.basename(line.cwd)),
             extra: { agent },
           });
+        }
+
+        const extra: Extra = { cwd: line.cwd, model: line.model ?? null };
+
+        if (line.file !== undefined) {
+          extra["file"] = line.file;
+        }
+
+        if (line.channel !== undefined && line.channel !== null) {
+          extra["channel"] = line.channel.source;
+          extra["from"] = line.channel.user;
         }
 
         yield event({
@@ -363,14 +451,7 @@ export const prompts = ({ ssh }: PromptsOptions = {}) =>
           thing: id,
           ts: iso(line.ts),
           text: line.text.trim(),
-          extra: {
-            cwd: line.cwd,
-            model: line.model ?? null,
-            ...(line.file === undefined ? {} : { file: line.file }),
-            ...(line.channel === undefined || line.channel === null
-              ? {}
-              : { channel: line.channel.source, from: line.channel.user }),
-          },
+          extra,
         });
       }
     },

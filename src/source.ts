@@ -2,7 +2,6 @@ import { readFileSync } from "node:fs";
 
 import type { Row } from "./schema.ts";
 
-/** One dated, read-only snapshot: `data/raw/<source>/<YYYY-MM-DD>/`. */
 export interface Snapshot {
   readonly source: string;
   readonly date: string;
@@ -10,32 +9,24 @@ export interface Snapshot {
 }
 
 export interface FetchContext {
-  /** An empty directory that becomes today's snapshot once fetch resolves. */
   readonly dir: string;
-  /** The date of this source's last snapshot, so fetch can take only what's new. Null on the first run. */
   readonly since: string | null;
-  /** A private directory this source keeps between runs, like where it left off. Never in a snapshot. */
   readonly state: string;
 }
 
 export interface Source {
   readonly name: string;
-  /** Copies what the service gives you into `dir`, as close to raw as you can. Omit for one-time exports you drop in by hand. */
   readonly fetch?: (context: FetchContext) => Promise<void>;
-  /** Days between snapshots. Defaults to 1. Under 1 it's a part of a day: `0.125` is every 3 hours, and the day's later snapshots are `<date>.<HHMM>`. */
   readonly every?: number;
-  /** Files whose change means there's something new, for the LaunchAgent `commonplace install` sets up. */
-  readonly watch?: ReadonlyArray<string>;
-  /** Turns one snapshot into rows. Pure: reads only the snapshot, no clock, no network. */
+  readonly watch?: readonly string[];
   readonly rows: (snapshot: Snapshot) => AsyncIterable<Row> | Iterable<Row>;
 }
 
 export const defineSource = (source: Source): Source => source;
 
-/** Non-empty lines, split on `\n` only: JSON text may hold U+2028, which readline would also split on. */
-export async function* lines(path: string): AsyncGenerator<string> {
+export const lines = async function* lines(path: string): AsyncGenerator<string> {
   const decoder = new TextDecoder();
-  let pending: Array<string> = [];
+  let pending: string[] = [];
 
   for await (const bytes of Bun.file(path).stream()) {
     const text = decoder.decode(bytes, { stream: true });
@@ -43,7 +34,7 @@ export async function* lines(path: string): AsyncGenerator<string> {
 
     for (let end = text.indexOf("\n"); end !== -1; end = text.indexOf("\n", start)) {
       pending.push(text.slice(start, end));
-      const line = pending.join("").replace(/\r$/, "");
+      const line = pending.join("").replace(/\r$/u, "");
       pending = [];
       start = end + 1;
 
@@ -51,42 +42,48 @@ export async function* lines(path: string): AsyncGenerator<string> {
         yield line;
       }
     }
+
     pending.push(text.slice(start));
   }
 
   const last = pending.join("") + decoder.decode();
 
   if (last.trim() !== "") {
-    yield last.replace(/\r$/, "");
+    yield last.replace(/\r$/u, "");
   }
-}
+};
 
-export async function* jsonl<T>(path: string): AsyncGenerator<T> {
+export const jsonl = async function* jsonl<T>(path: string): AsyncGenerator<T> {
   for await (const line of lines(path)) {
+    // SAFETY: a source reads only files its own fetch or export wrote, so it knows their shape.
     yield JSON.parse(line) as T;
   }
-}
+};
 
-export const json = <T>(path: string): Promise<T> => Bun.file(path).json() as Promise<T>;
+export const json = async <T>(path: string): Promise<T> => {
+  const parsed: unknown = await Bun.file(path).json();
 
-export const writeJsonl = (path: string, items: Iterable<unknown>): Promise<number> =>
-  Bun.write(path, Array.from(items, (item) => `${JSON.stringify(item)}\n`).join(""));
+  // SAFETY: a source reads only files its own fetch or export wrote, so it knows their shape.
+  return parsed as T;
+};
 
-/** The records of a CSV file, header first. RFC 4180: quoted fields may hold commas, doubled quotes and newlines. */
-export const csv = (path: string): Array<Array<string>> => {
-  const input = readFileSync(path, "utf8");
-  const rows: Array<Array<string>> = [];
-  let row: Array<string> = [];
+export const writeJsonl = async (path: string, items: Iterable<unknown>): Promise<number> =>
+  await Bun.write(path, Array.from(items, (item) => `${JSON.stringify(item)}\n`).join(""));
+
+export const csv = (path: string): string[][] => {
+  const input = readFileSync(path, "utf-8");
+  const rows: string[][] = [];
+  let row: string[] = [];
   let field = "";
   let quoted = false;
 
-  for (let i = 0; i < input.length; i++) {
+  for (let i = 0; i < input.length; i += 1) {
     const char = input[i];
 
     if (quoted) {
       if (char === '"' && input[i + 1] === '"') {
         field += '"';
-        i++;
+        i += 1;
       } else if (char === '"') {
         quoted = false;
       } else {
@@ -99,8 +96,9 @@ export const csv = (path: string): Array<Array<string>> => {
       field = "";
     } else if (char === "\n" || char === "\r") {
       if (char === "\r" && input[i + 1] === "\n") {
-        i++;
+        i += 1;
       }
+
       row.push(field);
       rows.push(row);
       row = [];

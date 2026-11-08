@@ -16,5 +16,6 @@ export default defineConfig({
     ...(process.platform === "darwin" ? [imessage()] : []),
   ],
 
-  redact: (row) => row.type === "event" && /\b(password|api[_ -]?key|secret)\b/i.test(row.text ?? ""),
+  redact: (row) =>
+    row.type === "event" && /\b(?:password|api[_ -]?key|secret)\b/iu.test(row.text ?? ""),
 });

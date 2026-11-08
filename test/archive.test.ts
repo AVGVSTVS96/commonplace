@@ -13,14 +13,16 @@ import { tmpdir } from "node:os";
 
 import { build, paths } from "../src/build.ts";
 import { defineConfig } from "../src/config.ts";
-import { event, link, type Row, thing, urlRef } from "../src/schema.ts";
+import { event, link, thing, urlRef } from "../src/schema.ts";
+import type { Row } from "../src/schema.ts";
 import { defineSource, jsonl } from "../src/source.ts";
 import { open } from "../src/store.ts";
 import { sync } from "../src/sync.ts";
 
-const fromFile = (name: string) => defineSource({ name, rows: ({ dir }) => jsonl<Row>(`${dir}/rows.jsonl`) });
+const fromFile = (name: string) =>
+  defineSource({ name, rows: ({ dir }) => jsonl<Row>(`${dir}/rows.jsonl`) });
 
-const snapshot = (data: string, source: string, date: string, rows: ReadonlyArray<Row>) => {
+const snapshot = (data: string, source: string, date: string, rows: readonly Row[]) => {
   const dir = `${paths(data).raw}/${source}/${date}`;
   mkdirSync(dir, { recursive: true });
   writeFileSync(`${dir}/rows.jsonl`, rows.map((row) => JSON.stringify(row)).join("\n"));
@@ -29,10 +31,13 @@ const snapshot = (data: string, source: string, date: string, rows: ReadonlyArra
 const scratch = () => {
   const dir = mkdtempSync(`${tmpdir()}/commonplace-`);
   onTestFinished(() => {
-    for (const path of readdirSync(dir, { encoding: "utf8", recursive: true }))
+    for (const path of readdirSync(dir, { encoding: "utf-8", recursive: true })) {
       chmodSync(`${dir}/${path}`, 0o700);
+    }
+
     rmSync(dir, { recursive: true, force: true });
   });
+
   return dir;
 };
 
@@ -67,7 +72,7 @@ test("urlRef drops www, tracking, fragments, and trailing slashes", () => {
   expect(page).toBe("url:example.com/post?id=1");
 });
 
-const ids = (hrefs: ReadonlyArray<string>) => hrefs.map((href) => urlRef(href)?.id ?? null);
+const ids = (hrefs: readonly string[]) => hrefs.map((href) => urlRef(href)?.id ?? null);
 
 test("urlRef names posts, videos, repos and pull requests the same from any link", () => {
   expect(
@@ -145,6 +150,7 @@ test("redacted rows never reach the database, and their events go with them", as
 test("timeline compares times as instants, whatever offset they're written in", async () => {
   const data = fixture();
   await build(config, data);
+
   const posted = (since: string) =>
     open(paths(data).db)
       .timeline({ verb: "posted", since })
@@ -175,11 +181,18 @@ test("search dates an undated thing by its latest event, but never an undated ev
   snapshot(data, "notes", "2026-01-23", [
     thing({ id: "chat:1", kind: "chat", title: "Lisbon crew" }),
     event({ verb: "received", thing: "chat:1", ts: "2026-03-01T00:00:00.000Z", key: "m1" }),
-    event({ verb: "sent", thing: "chat:1", ts: "2026-03-05T00:00:00.000Z", key: "m2", text: "Lisbon soon" }),
+    event({
+      verb: "sent",
+      thing: "chat:1",
+      ts: "2026-03-05T00:00:00.000Z",
+      key: "m2",
+      text: "Lisbon soon",
+    }),
     event({ verb: "sent", thing: "chat:1", key: "m3", text: "undated Lisbon" }),
     thing({ id: "note:3", kind: "note", text: "Lisbon, never touched" }),
   ]);
   await build(config, data);
+
   const at = Object.fromEntries(
     open(paths(data).db)
       .search("lisbon")
@@ -208,22 +221,25 @@ test("search falls back to plain words when the query isn't FTS5 syntax", async 
 test("sync snapshots each source once a day, read-only, and leaves nothing behind on failure", async () => {
   const data = scratch();
   let calls = 0;
+
   const notes = defineSource({
     name: "notes",
     fetch: async ({ dir, since }) => {
       calls += 1;
       expect(since).toBeNull();
-      writeFileSync(`${dir}/rows.jsonl`, JSON.stringify(thing({ id: "note:1", kind: "note" })));
+      await Bun.write(`${dir}/rows.jsonl`, JSON.stringify(thing({ id: "note:1", kind: "note" })));
     },
     rows: ({ dir }) => jsonl<Row>(`${dir}/rows.jsonl`),
   });
+
   const broken = defineSource({
     name: "broken",
     fetch: async () => {
-      throw new Error("offline");
+      await Promise.reject(new Error("offline"));
     },
     rows: () => [],
   });
+
   const both = defineConfig({ sources: [notes, broken] });
 
   const first = await sync(both, data, () => {});
@@ -236,26 +252,34 @@ test("sync snapshots each source once a day, read-only, and leaves nothing behin
   });
   expect(second?.fetched).toEqual([]);
   expect(calls).toBe(1);
-  expect(statSync(`${paths(data).raw}/notes/${date}/rows.jsonl`).mode & 0o222).toBe(0);
+  expect(statSync(`${paths(data).raw}/notes/${date}/rows.jsonl`).mode % 0o1000).toBe(0o444);
   expect(readdirSync(`${paths(data).raw}/broken`)).toEqual([]);
 });
 
 test("a fetch that never ends fails at its limit, and the sources after it still run", async () => {
   const data = scratch();
-  const stuck = defineSource({ name: "stuck", fetch: () => new Promise(() => {}), rows: () => [] });
+
+  const stuck = defineSource({
+    name: "stuck",
+    fetch: async () => {
+      await Promise.withResolvers<undefined>().promise;
+    },
+    rows: () => [],
+  });
+
   const notes = defineSource({
     name: "notes",
-    fetch: async ({ dir }) =>
-      writeFileSync(`${dir}/rows.jsonl`, JSON.stringify(thing({ id: "note:1", kind: "note" }))),
+    fetch: async ({ dir }) => {
+      await Bun.write(`${dir}/rows.jsonl`, JSON.stringify(thing({ id: "note:1", kind: "note" })));
+    },
     rows: ({ dir }) => jsonl<Row>(`${dir}/rows.jsonl`),
   });
 
   const synced = await sync(defineConfig({ sources: [stuck, notes] }), data, () => {}, 50);
 
   expect(synced?.fetched).toEqual(["notes"]);
-  expect(synced?.failed).toEqual([
-    { source: "stuck", error: expect.stringContaining("still running after") },
-  ]);
+  expect(synced?.failed.map((failure) => failure.source)).toEqual(["stuck"]);
+  expect(synced?.failed[0]?.error).toContain("still running after");
 });
 
 test("sync rebuilds when a snapshot is dropped in by hand, and only then", async () => {
@@ -263,66 +287,87 @@ test("sync rebuilds when a snapshot is dropped in by hand, and only then", async
   const only = defineConfig({ sources: [fromFile("export")] });
 
   snapshot(data, "export", "2026-01-01", [thing({ id: "note:1", kind: "note" })]);
-  expect((await sync(only, data, () => {}))?.built?.things).toBe(1);
-  expect((await sync(only, data, () => {}))?.built).toBeNull();
+  const first = await sync(only, data, () => {});
+  const unchanged = await sync(only, data, () => {});
 
   snapshot(data, "export", "2026-01-02", [thing({ id: "note:2", kind: "note" })]);
-  expect((await sync(only, data, () => {}))?.built?.things).toBe(2);
+  const second = await sync(only, data, () => {});
+
+  expect(first?.built?.things).toBe(1);
+  expect(unchanged?.built).toBeNull();
+  expect(second?.built?.things).toBe(2);
 });
 
 const daysAgo = (days: number) => new Date(Date.now() - days * 86_400_000).toLocaleDateString("sv");
 
 test("a source with `every` waits that many days, and gets its own state directory", async () => {
   const data = scratch();
-  const states: Array<string> = [];
+  const states: string[] = [];
+
   const weekly = defineSource({
     name: "weekly",
     every: 7,
     fetch: async ({ dir, state }) => {
       states.push(state);
-      writeFileSync(`${dir}/rows.jsonl`, "");
+      await Bun.write(`${dir}/rows.jsonl`, "");
     },
     rows: () => [],
   });
+
   const only = defineConfig({ sources: [weekly] });
 
   snapshot(data, "weekly", daysAgo(6), []);
-  expect((await sync(only, data, () => {}))?.fetched).toEqual([]);
+  const early = await sync(only, data, () => {});
 
   snapshot(data, "weekly", daysAgo(7), []);
   rmSync(`${paths(data).raw}/weekly/${daysAgo(6)}`, { recursive: true });
-  expect((await sync(only, data, () => {}))?.fetched).toEqual(["weekly"]);
+  const due = await sync(only, data, () => {});
+
+  expect(early?.fetched).toEqual([]);
+  expect(due?.fetched).toEqual(["weekly"]);
   expect(states).toEqual([`${data}/state/weekly`]);
 });
 
 test("a source with `every` under a day takes later snapshots the same day, named by time", async () => {
   const data = scratch();
+
   const hourly = defineSource({
     name: "hourly",
     every: 1 / 24,
-    fetch: async ({ dir }) => writeFileSync(`${dir}/rows.jsonl`, ""),
+    fetch: async ({ dir }) => {
+      await Bun.write(`${dir}/rows.jsonl`, "");
+    },
     rows: () => [],
   });
+
   const only = defineConfig({ sources: [hourly] });
   const today = daysAgo(0);
   const first = `${paths(data).raw}/hourly/${today}`;
 
   snapshot(data, "hourly", today, []);
-  expect((await sync(only, data, () => {}))?.fetched).toEqual([]);
+  const early = await sync(only, data, () => {});
 
   utimesSync(first, new Date(Date.now() - 3_600_000), new Date(Date.now() - 3_600_000));
-  expect((await sync(only, data, () => {}))?.fetched).toEqual(["hourly"]);
+  const due = await sync(only, data, () => {});
+
+  expect(early?.fetched).toEqual([]);
+  expect(due?.fetched).toEqual(["hourly"]);
   expect(
-    readdirSync(`${paths(data).raw}/hourly`).filter((name) => /^\d{4}-\d{2}-\d{2}\.\d{4}$/.test(name)),
+    readdirSync(`${paths(data).raw}/hourly`).filter((name) =>
+      /^\d{4}-\d{2}-\d{2}\.\d{4}$/u.test(name),
+    ),
   ).toHaveLength(1);
 });
 
 test("lines split on newlines only, so JSON text may hold a line separator", async () => {
   const file = `${scratch()}/rows.jsonl`;
-  writeFileSync(file, `${JSON.stringify({ text: "one two" })}\r\n\n${JSON.stringify({ text: "three" })}`);
+  writeFileSync(
+    file,
+    `${JSON.stringify({ text: "one\u2028two" })}\r\n\n${JSON.stringify({ text: "three" })}`,
+  );
 
   expect(await Array.fromAsync(jsonl<{ text: string }>(file))).toEqual([
-    { text: "one two" },
+    { text: "one\u2028two" },
     { text: "three" },
   ]);
 });

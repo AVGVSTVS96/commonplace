@@ -1,5 +1,6 @@
 import { createInterface } from "node:readline";
 
+import type { Json } from "./schema.ts";
 import type { Store } from "./store.ts";
 
 const tools = [
@@ -44,20 +45,25 @@ const tools = [
   },
 ] as const;
 
-type Args = Record<string, unknown>;
+type Args = Readonly<Record<string, Json>>;
 
+// oxlint-disable-next-line anti-slop/no-unknown-parameters -- JSON.stringify takes any value
 const text = (value: unknown) => ({
   content: [{ type: "text", text: JSON.stringify(value, null, 1) }],
 });
 
 const call = (store: Store, name: string, args: Args) => {
+  // oxlint-disable-next-line anti-slop/no-runtime-typeof -- tool arguments are the client's JSON, read here
   const string = (key: string) => (typeof args[key] === "string" ? args[key] : undefined);
+  // oxlint-disable-next-line anti-slop/no-runtime-typeof -- tool arguments are the client's JSON, read here
   const number = (key: string) => (typeof args[key] === "number" ? args[key] : undefined);
 
   switch (name) {
-    case "search":
+    case "search": {
       return text(store.search(string("query") ?? "", number("limit")));
-    case "timeline":
+    }
+
+    case "timeline": {
       return text(
         store.timeline({
           since: string("since"),
@@ -66,53 +72,74 @@ const call = (store: Store, name: string, args: Args) => {
           limit: number("limit"),
         }),
       );
-    case "show":
+    }
+
+    case "show": {
       return text(store.show(string("id") ?? "") ?? `No record with id ${string("id")}`);
-    case "stats":
+    }
+
+    case "stats": {
       return text(store.stats());
-    default:
+    }
+
+    default: {
       return { ...text(`Unknown tool ${name}`), isError: true };
+    }
   }
 };
 
 interface Request {
   readonly id?: string | number;
   readonly method: string;
-  readonly params?: Args;
+  readonly params?: {
+    readonly protocolVersion?: string;
+    readonly name?: string;
+    readonly arguments?: Args;
+  };
 }
 
-const send = (message: object) => process.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", ...message })}\n`);
+type Reply =
+  | { readonly result: object }
+  | { readonly error: { readonly code: number; readonly message: string } };
+
+const send = (id: Request["id"] | null, reply: Reply) =>
+  process.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", id, ...reply })}\n`);
 
 const parse = (line: string): Request | null => {
   try {
+    // SAFETY: a JSON-RPC 2.0 request; every read below still holds when a client sends other JSON.
     return JSON.parse(line) as Request;
   } catch {
     return null;
   }
 };
 
-/** A Model Context Protocol server over stdio: newline-delimited JSON-RPC, tools only. */
 export const serve = async (latest: () => Store, version: string): Promise<void> => {
   const result = (request: Request): object | null => {
     switch (request.method) {
-      case "initialize":
+      case "initialize": {
         return {
-          protocolVersion: request.params?.["protocolVersion"] ?? "2025-06-18",
+          protocolVersion: request.params?.protocolVersion ?? "2025-06-18",
           capabilities: { tools: {} },
           serverInfo: { name: "commonplace", version },
         };
-      case "ping":
+      }
+
+      case "ping": {
         return {};
-      case "tools/list":
+      }
+
+      case "tools/list": {
         return { tools };
-      case "tools/call":
-        return call(
-          latest(),
-          String(request.params?.["name"]),
-          (request.params?.["arguments"] ?? {}) as Args,
-        );
-      default:
+      }
+
+      case "tools/call": {
+        return call(latest(), String(request.params?.name), request.params?.arguments ?? {});
+      }
+
+      default: {
         return null;
+      }
     }
   };
 
@@ -124,7 +151,7 @@ export const serve = async (latest: () => Store, version: string): Promise<void>
     const request = parse(line);
 
     if (request === null) {
-      send({ id: null, error: { code: -32700, message: "Parse error" } });
+      send(null, { error: { code: -32_700, message: "Parse error" } });
       continue;
     }
 
@@ -134,16 +161,15 @@ export const serve = async (latest: () => Store, version: string): Promise<void>
 
     try {
       const answer = result(request);
+
       send(
+        request.id,
         answer === null
-          ? {
-              id: request.id,
-              error: { code: -32601, message: `Method not found: ${request.method}` },
-            }
-          : { id: request.id, result: answer },
+          ? { error: { code: -32_601, message: `Method not found: ${request.method}` } }
+          : { result: answer },
       );
     } catch (error) {
-      send({ id: request.id, result: { ...text(String(error)), isError: true } });
+      send(request.id, { result: { ...text(String(error)), isError: true } });
     }
   }
 };

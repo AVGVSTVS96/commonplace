@@ -9,25 +9,26 @@ import {
   statSync,
   writeFileSync,
 } from "node:fs";
+import { setTimeout as sleep } from "node:timers/promises";
 
-import { build, type Built, errorMessage, paths, snapshotsOf } from "./build.ts";
+import { build, errorMessage, paths, snapshotsOf } from "./build.ts";
+import type { Built } from "./build.ts";
 import type { Config } from "./config.ts";
 
-/** A fetch still going after this long is stuck: it fails, and the sources after it still run. */
 const FETCH_LIMIT_MS = 30 * 60_000;
 
 const within = async <T>(ms: number, work: Promise<T>): Promise<T> => {
-  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timer = new AbortController();
+
+  const timeout = async () => {
+    await sleep(ms, undefined, { signal: timer.signal });
+    throw new Error(`still running after ${ms / 60_000} minutes`);
+  };
 
   try {
-    return await Promise.race([
-      work,
-      new Promise<never>((_, reject) => {
-        timer = setTimeout(() => reject(new Error(`still running after ${ms / 60_000} minutes`)), ms);
-      }),
-    ]);
+    return await Promise.race([work, timeout()]);
   } finally {
-    clearTimeout(timer);
+    timer.abort();
   }
 };
 
@@ -45,20 +46,19 @@ const alive = (pid: number): boolean => {
   }
 };
 
-/** Holds `data/sync.lock` while `work` runs. Returns null when another live sync holds it. */
 const locked = async <T>(data: string, work: () => Promise<T>): Promise<T | null> => {
   const lock = `${data}/sync.lock`;
 
   try {
     writeFileSync(lock, String(process.pid), { flag: "wx" });
   } catch {
-    if (alive(Number(readFileSync(lock, "utf8")))) {
+    if (alive(Number(readFileSync(lock, "utf-8")))) {
       return null;
     }
 
     rmSync(lock, { force: true });
 
-    return locked(data, work);
+    return await locked(data, work);
   }
 
   try {
@@ -69,25 +69,21 @@ const locked = async <T>(data: string, work: () => Promise<T>): Promise<T | null
 };
 
 const readOnly = (dir: string): void => {
-  for (const name of readdirSync(dir, { recursive: true, encoding: "utf8" })) {
+  for (const name of readdirSync(dir, { recursive: true, encoding: "utf-8" })) {
     const path = `${dir}/${name}`;
     chmodSync(path, statSync(path).isDirectory() ? 0o555 : 0o444);
   }
+
   chmodSync(dir, 0o555);
 };
 
 export interface Synced {
-  readonly fetched: ReadonlyArray<string>;
-  readonly failed: ReadonlyArray<{ readonly source: string; readonly error: string }>;
+  readonly fetched: readonly string[];
+  readonly failed: readonly { readonly source: string; readonly error: string }[];
   readonly built: Built | null;
 }
 
-/**
- * Takes today's snapshot of every source that fetches and is due, then rebuilds if any snapshot,
- * fetched now or dropped in by hand, is newer than the database.
- * Safe to call from as many hooks as you like: a running sync makes the others return null.
- */
-export const sync = (
+export const sync = async (
   config: Config,
   data: string,
   log: (line: string) => void,
@@ -95,19 +91,21 @@ export const sync = (
 ): Promise<Synced | null> => {
   mkdirSync(data, { recursive: true });
 
-  return locked(data, async () => {
+  return await locked(data, async () => {
     const { raw, db } = paths(data);
     const date = today();
-    const fetched: Array<string> = [];
-    const failed: Array<{ source: string; error: string }> = [];
+    const fetched: string[] = [];
+    const failed: { source: string; error: string }[] = [];
 
     for (const source of config.sources) {
       const previous = snapshotsOf(raw, source.name).at(-1);
       const every = source.every ?? 1;
+
       const waited =
         previous === undefined ||
         (every < 1
-          ? previous.date < date || Date.now() - statSync(previous.dir).mtimeMs >= every * 86_400_000
+          ? previous.date < date ||
+            Date.now() - statSync(previous.dir).mtimeMs >= every * 86_400_000
           : days(previous.date, date) >= every);
 
       if (source.fetch === undefined || !waited) {
@@ -115,7 +113,10 @@ export const sync = (
       }
 
       const name =
-        previous?.date === date ? `${date}.${new Date().toTimeString().slice(0, 5).replace(":", "")}` : date;
+        previous?.date === date
+          ? `${date}.${new Date().toTimeString().slice(0, 5).replace(":", "")}`
+          : date;
+
       const final = `${raw}/${source.name}/${name}`;
       const partial = `${raw}/${source.name}/.${name}.partial`;
       rmSync(partial, { recursive: true, force: true });
@@ -142,6 +143,7 @@ export const sync = (
     }
 
     const builtAt = existsSync(db) ? statSync(db).mtimeMs : null;
+
     const stale =
       builtAt === null ||
       config.sources.some((source) =>

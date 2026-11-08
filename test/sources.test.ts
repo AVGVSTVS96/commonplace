@@ -2,10 +2,8 @@ import { Database } from "bun:sqlite";
 import { expect, onTestFinished, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname } from "node:path";
+import path from "node:path";
 
-import type { Row } from "../src/schema.ts";
-import type { Source } from "../src/source.ts";
 import { github } from "../sources/github.ts";
 import { imessage } from "../sources/imessage.ts";
 import { mail } from "../sources/mail.ts";
@@ -14,23 +12,33 @@ import raindrop from "../sources/raindrop.ts";
 import takeout from "../sources/takeout.ts";
 import xArchive, { postedAt } from "../sources/x-archive.ts";
 import { x } from "../sources/x.ts";
+import type { Extra, Json, Row } from "../src/schema.ts";
+import type { Source } from "../src/source.ts";
 
 const folder = (files: Record<string, string>): string => {
   const dir = mkdtempSync(`${tmpdir()}/commonplace-source-`);
-  onTestFinished(() => rmSync(dir, { recursive: true, force: true }));
+  onTestFinished(() => {
+    rmSync(dir, { recursive: true, force: true });
+  });
 
-  for (const [path, text] of Object.entries(files)) {
-    mkdirSync(dirname(`${dir}/${path}`), { recursive: true });
-    writeFileSync(`${dir}/${path}`, text);
+  for (const [file, text] of Object.entries(files)) {
+    mkdirSync(path.dirname(`${dir}/${file}`), { recursive: true });
+    writeFileSync(`${dir}/${file}`, text);
   }
 
   return dir;
 };
 
-const rowsOf = (source: Source, dir: string): Promise<Array<Row>> =>
-  Array.fromAsync(source.rows({ source: source.name, date: "2026-01-01", dir }));
+const rowsOf = async (source: Source, dir: string): Promise<Row[]> =>
+  await Array.fromAsync(source.rows({ source: source.name, date: "2026-01-01", dir }));
 
-const pick = (rows: ReadonlyArray<Row>, type: Row["type"]) => rows.filter((row) => row.type === type);
+// SAFETY: an asymmetric matcher stands in for the row it matches.
+const like = (fields: Partial<Row>): Row => expect.objectContaining(fields) as Row;
+
+// SAFETY: an asymmetric matcher stands in for the extra it matches.
+const likeExtra = (fields: Extra): Extra => expect.objectContaining(fields) as Extra;
+
+const pick = (rows: readonly Row[], type: Row["type"]) => rows.filter((row) => row.type === type);
 
 test("takeout: activity verbs come from title prefixes, places and searches get stable ids", async () => {
   const activity = [
@@ -52,6 +60,7 @@ test("takeout: activity verbs come from title prefixes, places and searches get 
       time: "2026-01-02T13:00:00Z",
     },
   ];
+
   const dir = folder({
     "My Activity/Search/MyActivity.json": JSON.stringify(activity),
     "Saved/Lisbon.csv":
@@ -59,33 +68,46 @@ test("takeout: activity verbs come from title prefixes, places and searches get 
     "YouTube and YouTube Music/comments/comments.csv":
       'Comment ID,Comment Create Timestamp,Video ID,Comment Text\nc1,2026-01-03T00:00:00+00:00,abc,"{""text"":""nice""}"\n',
   });
+
   const rows = await rowsOf(takeout, dir);
-  const unzipped = folder({ "Takeout/My Activity/Search/MyActivity.json": JSON.stringify(activity) });
+
+  const unzipped = folder({
+    "Takeout/My Activity/Search/MyActivity.json": JSON.stringify(activity),
+  });
 
   expect(await rowsOf(takeout, unzipped)).toEqual(
-    await rowsOf(takeout, folder({ "My Activity/Search/MyActivity.json": JSON.stringify(activity) })),
+    await rowsOf(
+      takeout,
+      folder({ "My Activity/Search/MyActivity.json": JSON.stringify(activity) }),
+    ),
   );
   expect(pick(await rowsOf(takeout, unzipped), "event")).not.toEqual([]);
 
-  expect(pick(rows, "event").map((row) => (row.type === "event" ? [row.verb, row.thing] : []))).toEqual([
+  expect(
+    pick(rows, "event").map((row) => (row.type === "event" ? [row.verb, row.thing] : [])),
+  ).toEqual([
     ["searched", "query:best ramen"],
     ["watched", "yt:video:abc"],
     ["visited", "url:example.com/page"],
     ["saved", "place:31"],
     ["posted", "yt:comment:c1"],
   ]);
-  expect(rows).toContainEqual(
-    expect.objectContaining({ id: "yt:video:abc", title: "A talk", author: "A Channel" }),
-  );
-  expect(rows).toContainEqual(expect.objectContaining({ id: "url:example.com/page", title: null }));
-  expect(rows).toContainEqual({ type: "link", from: "yt:comment:c1", rel: "replies_to", to: "yt:video:abc" });
+  expect(rows).toContainEqual(like({ id: "yt:video:abc", title: "A talk", author: "A Channel" }));
+  expect(rows).toContainEqual(like({ id: "url:example.com/page", title: null }));
+  expect(rows).toContainEqual({
+    type: "link",
+    from: "yt:comment:c1",
+    rel: "replies_to",
+    to: "yt:video:abc",
+  });
 
   const unknown = folder({
     "My Activity/Search/MyActivity.json": JSON.stringify([
       { title: "Teleported to Mars", time: "2026-01-02T10:00:00Z" },
     ]),
   });
-  expect(rowsOf(takeout, unknown)).rejects.toThrow(/no verb for title "Teleported to Mars"/);
+
+  expect(rowsOf(takeout, unknown)).rejects.toThrow(/no verb for title "Teleported to Mars"/u);
 });
 
 test("raindrop: a save per bookmark, folders as collections, tweets named as tweets", async () => {
@@ -96,32 +118,47 @@ test("raindrop: a save per bookmark, folders as collections, tweets named as twe
       "2,Page,my note,an excerpt,https://example.com/a,Unsorted,,2026-01-02T00:00:00.000Z,,,false",
     ].join("\n"),
   });
+
   const rows = await rowsOf(raindrop, dir);
 
   expect(rows).toContainEqual(
-    expect.objectContaining({ type: "thing", id: "x:tweet:5", kind: "tweet", title: "A post, quoted" }),
-  );
-  expect(rows).toContainEqual(
-    expect.objectContaining({
-      verb: "saved",
-      thing: "x:tweet:5",
-      collections: ["AI"],
-      extra: expect.objectContaining({ tags: ["agents", "tools"], favorite: true }),
+    like({
+      type: "thing",
+      id: "x:tweet:5",
+      kind: "tweet",
+      title: "A post, quoted",
     }),
   );
   expect(rows).toContainEqual(
-    expect.objectContaining({ verb: "saved", thing: "url:example.com/a", collections: [], text: "my note" }),
+    like({
+      verb: "saved",
+      thing: "x:tweet:5",
+      collections: ["AI"],
+      extra: likeExtra({ tags: ["agents", "tools"], favorite: true }),
+    }),
+  );
+  expect(rows).toContainEqual(
+    like({
+      verb: "saved",
+      thing: "url:example.com/a",
+      collections: [],
+      text: "my note",
+    }),
   );
 });
 
-const post = (id: string, user: string, text: string, legacy: object = {}) => ({
+const post = (
+  id: string,
+  user: string,
+  text: string,
+  legacy: Readonly<Record<string, Json>> = {},
+) => ({
   rest_id: id,
   core: { user_results: { result: { rest_id: user, core: { screen_name: `user${user}` } } } },
   legacy: { full_text: text, created_at: "Thu Jan 01 12:00:00 +0000 2026", ...legacy },
 });
 
-/** One GraphQL page as x.com sends it: a timeline of posts. */
-const timeline = (...posts: ReadonlyArray<object>) => ({
+const timeline = (...posts: readonly object[]) => ({
   timeline: {
     instructions: [
       {
@@ -135,38 +172,55 @@ const timeline = (...posts: ReadonlyArray<object>) => ({
   },
 });
 
-const pages = (...data: ReadonlyArray<object>) =>
+const pages = (...data: readonly object[]) =>
   data.map((page) => `${JSON.stringify({ data: page })}\n`).join("");
 
 test("x: bookmarks with their folders, likes, and only your own posts, from the pages x.com sent", async () => {
   const shared = post("10", "7", "a thread on kerning https://t.co/a", {
     entities: { urls: [{ url: "https://t.co/a", expanded_url: "https://example.com/kerning" }] },
   });
-  const profile = (...posts: ReadonlyArray<object>) => ({
+
+  const profile = (...posts: readonly object[]) => ({
     user: { result: { timeline: timeline(...posts) } },
   });
+
   const dir = folder({
     "viewer.json": JSON.stringify({ id: "1" }),
     "bookmarks.jsonl": pages({ bookmark_timeline_v2: timeline(shared) }),
     "folders.json": pages({
       viewer: {
-        user_results: { result: { bookmark_collections_slice: { items: [{ id: "55", name: "type" }] } } },
+        user_results: {
+          result: { bookmark_collections_slice: { items: [{ id: "55", name: "type" }] } },
+        },
       },
     }),
     "folders/55.jsonl": pages({ bookmark_collection_timeline: timeline(shared) }),
     "likes.jsonl": pages(profile(post("11", "8", "liked"))),
     "posts.jsonl": pages(profile(post("12", "1", "mine"), post("13", "9", "someone else's"))),
   });
+
   const rows = await rowsOf(x(), dir);
 
   expect(pick(rows, "event")).toEqual([
-    expect.objectContaining({ verb: "saved", thing: "x:tweet:10", collections: ["x bookmarks"] }),
-    expect.objectContaining({ verb: "saved", thing: "x:tweet:10", collections: ["x bookmarks", "type"] }),
-    expect.objectContaining({ verb: "liked", thing: "x:tweet:11" }),
-    expect.objectContaining({ verb: "posted", thing: "x:tweet:12", ts: "2026-01-01T12:00:00.000Z" }),
+    like({ verb: "saved", thing: "x:tweet:10", collections: ["x bookmarks"] }),
+    like({
+      verb: "saved",
+      thing: "x:tweet:10",
+      collections: ["x bookmarks", "type"],
+    }),
+    like({ verb: "liked", thing: "x:tweet:11" }),
+    like({
+      verb: "posted",
+      thing: "x:tweet:12",
+      ts: "2026-01-01T12:00:00.000Z",
+    }),
   ]);
   expect(rows).toContainEqual(
-    expect.objectContaining({ id: "x:tweet:10", author: "user7", url: "https://x.com/user7/status/10" }),
+    like({
+      id: "x:tweet:10",
+      author: "user7",
+      url: "https://x.com/user7/status/10",
+    }),
   );
   expect(rows).toContainEqual({
     type: "link",
@@ -174,10 +228,10 @@ test("x: bookmarks with their folders, likes, and only your own posts, from the 
     rel: "mentions",
     to: "url:example.com/kerning",
   });
-  expect(rows).not.toContainEqual(expect.objectContaining({ id: "x:tweet:13" }));
+  expect(rows).not.toContainEqual(like({ id: "x:tweet:13" }));
 });
 
-const js = (name: string, value: unknown) => `window.YTD.${name}.part0 = ${JSON.stringify(value)}`;
+const js = (name: string, value: Json) => `window.YTD.${name}.part0 = ${JSON.stringify(value)}`;
 
 test("x-archive: posts with their full text, likes, follows, DMs and Grok", async () => {
   const dir = folder({
@@ -207,7 +261,13 @@ test("x-archive: posts with their full text, likes, follows, DMs and Grok", asyn
       },
     ]),
     "data/like.js": js("like", [
-      { like: { tweetId: "20", fullText: "a &amp; b", expandedUrl: "https://x.com/i/web/status/20" } },
+      {
+        like: {
+          tweetId: "20",
+          fullText: "a &amp; b",
+          expandedUrl: "https://x.com/i/web/status/20",
+        },
+      },
     ]),
     "data/direct-messages.js": js("direct_messages", [
       {
@@ -239,19 +299,26 @@ test("x-archive: posts with their full text, likes, follows, DMs and Grok", asyn
       },
     ]),
   });
+
   const rows = await rowsOf(xArchive, dir);
   expect(rows).toContainEqual(
-    expect.objectContaining({ id: "x:tweet:10", text: "a long post cut short no more", author: "me" }),
+    like({
+      id: "x:tweet:10",
+      text: "a long post cut short no more",
+      author: "me",
+    }),
   );
-  expect(rows).toContainEqual(expect.objectContaining({ id: "x:tweet:9", kind: "tweet", author: "friend" }));
-  expect(rows).toContainEqual(expect.objectContaining({ id: "x:tweet:20", text: "a & b" }));
-  expect(rows).toContainEqual({ type: "link", from: "x:tweet:10", rel: "mentions", to: "url:example.com" });
-  expect(pick(rows, "event").map((row) => (row.type === "event" ? `${row.verb} ${row.thing}` : ""))).toEqual([
-    "posted x:tweet:10",
-    "liked x:tweet:20",
-    "received x:dm:1-2",
-    "sent x:grok:g",
-  ]);
+  expect(rows).toContainEqual(like({ id: "x:tweet:9", kind: "tweet", author: "friend" }));
+  expect(rows).toContainEqual(like({ id: "x:tweet:20", text: "a & b" }));
+  expect(rows).toContainEqual({
+    type: "link",
+    from: "x:tweet:10",
+    rel: "mentions",
+    to: "url:example.com",
+  });
+  expect(
+    pick(rows, "event").map((row) => (row.type === "event" ? `${row.verb} ${row.thing}` : "")),
+  ).toEqual(["posted x:tweet:10", "liked x:tweet:20", "received x:dm:1-2", "sent x:grok:g"]);
 });
 
 test("x-archive: a post's ID says when it was made, so likes and the posts you replied to have a date", () => {
@@ -260,9 +327,9 @@ test("x-archive: a post's ID says when it was made, so likes and the posts you r
   expect(postedAt("not a number")).toBeNull();
 });
 
-const chatDb = (path: string) => {
-  const db = new Database(path, { create: true });
-  db.exec(`
+const chatDb = (file: string) => {
+  const db = new Database(file, { create: true });
+  db.run(`
     CREATE TABLE chat (ROWID INTEGER PRIMARY KEY, guid TEXT, display_name TEXT, service_name TEXT, style INTEGER);
     CREATE TABLE handle (ROWID INTEGER PRIMARY KEY, id TEXT);
     CREATE TABLE chat_handle_join (chat_id INTEGER, handle_id INTEGER);
@@ -292,21 +359,23 @@ test("imessage: a whole chat.db snapshot gives every chat and message, and drop 
     "chat:imessage:iMessage;-;+15550001",
   ]);
   expect(pick(rows, "event")).toEqual([
-    expect.objectContaining({
+    like({
       verb: "received",
       key: "m1",
       ts: "2026-01-01T22:40:00.000Z",
       text: "see you at 8",
     }),
-    expect.objectContaining({
+    like({
       verb: "sent",
       key: "m2",
-      extra: expect.objectContaining({ associated: { kind: "like", removed: false, to: "p:0/m1" } }),
+      extra: likeExtra({
+        associated: { kind: "like", removed: false, to: "p:0/m1" },
+      }),
     }),
   ]);
 });
 
-const user = (fields: Record<string, unknown>, text: string) =>
+const user = (fields: Readonly<Record<string, Json>>, text: string) =>
   JSON.stringify({
     type: "user",
     sessionId: "s1",
@@ -333,7 +402,10 @@ test("prompts: typed turns and chat messages, not the harness, plugins or script
       user({ ts: "2026-01-01T00:04:00.000Z" }, "<command-name>/clear</command-name>"),
     ].join("\n"),
     ".codex/sessions/2026/01/01/rollout.jsonl": [
-      JSON.stringify({ type: "session_meta", payload: { id: "c1", cwd: "/work/api", source: "cli" } }),
+      JSON.stringify({
+        type: "session_meta",
+        payload: { id: "c1", cwd: "/work/api", source: "cli" },
+      }),
       JSON.stringify({
         type: "event_msg",
         timestamp: "2026-01-01T01:00:00.000Z",
@@ -342,7 +414,10 @@ test("prompts: typed turns and chat messages, not the harness, plugins or script
       JSON.stringify({ type: "turn_context", payload: { model: "gpt-x" } }),
     ].join("\n"),
     ".codex/sessions/2026/01/01/scripted.jsonl": [
-      JSON.stringify({ type: "session_meta", payload: { id: "c2", cwd: "/work/api", source: "exec" } }),
+      JSON.stringify({
+        type: "session_meta",
+        payload: { id: "c2", cwd: "/work/api", source: "exec" },
+      }),
       JSON.stringify({
         type: "event_msg",
         timestamp: "2026-01-01T02:00:00.000Z",
@@ -350,12 +425,14 @@ test("prompts: typed turns and chat messages, not the harness, plugins or script
       }),
     ].join("\n"),
   });
+
   const saved = {
     HOME: process.env["HOME"],
     CLAUDE_CONFIG_DIR: process.env["CLAUDE_CONFIG_DIR"],
     CODEX_HOME: process.env["CODEX_HOME"],
     PI_CODING_AGENT_DIR: process.env["PI_CODING_AGENT_DIR"],
   };
+
   Object.assign(process.env, {
     HOME: home,
     CLAUDE_CONFIG_DIR: `${home}/.claude`,
@@ -364,12 +441,13 @@ test("prompts: typed turns and chat messages, not the harness, plugins or script
   });
   const source = prompts();
   const dir = folder({});
+
   try {
     await source.fetch?.({ dir, since: null, state: folder({}) });
   } finally {
     for (const [key, value] of Object.entries(saved)) {
       if (value === undefined) {
-        delete process.env[key];
+        Reflect.deleteProperty(process.env, key);
       } else {
         process.env[key] = value;
       }
@@ -379,7 +457,9 @@ test("prompts: typed turns and chat messages, not the harness, plugins or script
   const rows = await rowsOf(source, dir);
 
   expect(
-    pick(rows, "event").map((row) => (row.type === "event" ? [row.thing, row.text, row.extra] : [])),
+    pick(rows, "event").map((row) =>
+      row.type === "event" ? [row.thing, row.text, row.extra] : [],
+    ),
   ).toEqual([
     ["session:claude:s1", "fix the build", { cwd: "/work/app", model: "claude-x" }],
     [
@@ -437,25 +517,26 @@ test("github: snapshots from older fetches, with or without reviews, commits, is
       )
       .join("\n"),
   });
+
   const rows = await rowsOf(github(), reviewing);
   expect(rows).toContainEqual(
-    expect.objectContaining({
+    like({
       id: "gh:pr:me/app#1",
       extra: { state: "merged", draft: false, closed_at: null },
     }),
   );
   expect(rows).toContainEqual(
-    expect.objectContaining({
+    like({
       id: "gh:pr:other/lib#2",
       author: "them",
-      extra: expect.objectContaining({ state: "merged" }),
+      extra: likeExtra({ state: "merged" }),
     }),
   );
   expect(rows).toContainEqual(
-    expect.objectContaining({ verb: "reviewed", key: "review:7", text: "looks good\n\nnit" }),
+    like({ verb: "reviewed", key: "review:7", text: "looks good\n\nnit" }),
   );
   expect(rows).toContainEqual(
-    expect.objectContaining({
+    like({
       verb: "committed",
       key: `commit:${"a".repeat(40)}`,
       thing: "gh:repo:me/app",
@@ -469,11 +550,11 @@ test("github: snapshots from older fetches, with or without reviews, commits, is
     "stars.jsonl": `${JSON.stringify({ starred_at: "2026-01-05T00:00:00Z", repo: { full_name: "Cool/Tool", description: "d", html_url: "https://github.com/Cool/Tool", language: null, topics: [], created_at: "2020-01-01T00:00:00Z" } })}\n`,
   });
 
-  expect(await rowsOf(github(), starring)).toEqual(
-    expect.arrayContaining([
-      expect.objectContaining({ verb: "opened", thing: "gh:issue:me/app#3" }),
-      expect.objectContaining({ verb: "saved", thing: "gh:repo:cool/tool", collections: ["github stars"] }),
-    ]),
+  const starred = await rowsOf(github(), starring);
+
+  expect(starred).toContainEqual(like({ verb: "opened", thing: "gh:issue:me/app#3" }));
+  expect(starred).toContainEqual(
+    like({ verb: "saved", thing: "gh:repo:cool/tool", collections: ["github stars"] }),
   );
 });
 
@@ -523,10 +604,11 @@ test("mail: an email per message, sent or received by its sender, replies linked
     "Sent/2.eml": replyMail,
     "Sent/10.eml": "Subject: no id\r\n\r\nhi",
   });
+
   const rows = await rowsOf(mail({ host: "imap.example.com", user: "me@example.com" }), dir);
 
   expect(rows).toContainEqual(
-    expect.objectContaining({
+    like({
       id: "mail:one@example.com",
       kind: "email",
       title: "Café plans",
@@ -537,7 +619,11 @@ test("mail: an email per message, sent or received by its sender, replies linked
     }),
   );
   expect(rows).toContainEqual(
-    expect.objectContaining({ id: "mail:two@example.com", title: "Re: Café", text: "See you there & then" }),
+    like({
+      id: "mail:two@example.com",
+      title: "Re: Café",
+      text: "See you there & then",
+    }),
   );
   expect(rows).toContainEqual({
     type: "link",
@@ -546,21 +632,27 @@ test("mail: an email per message, sent or received by its sender, replies linked
     to: "mail:one@example.com",
   });
   expect(
-    pick(rows, "event").map((row) => (row.type === "event" ? [row.verb, row.thing, row.collections] : [])),
+    pick(rows, "event").map((row) =>
+      row.type === "event"
+        ? [row.verb, row.thing.replace(/^mail:[0-9a-f]{40}$/u, "mail:<sha1>"), row.collections]
+        : [],
+    ),
   ).toEqual([
     ["received", "mail:one@example.com", ["INBOX"]],
     ["sent", "mail:two@example.com", ["Sent"]],
-    ["received", expect.stringMatching(/^mail:[0-9a-f]{40}$/), ["Sent"]],
+    ["received", "mail:<sha1>", ["Sent"]],
   ]);
 });
 
 test("mail: fetch signs in with the password in ~/.netrc, keeps each message as it came, and takes only new UIDs", async () => {
-  const commands: Array<string> = [];
+  const commands: string[] = [];
   let inbox = false;
+
   const messages = new Map([
     ["7", plainMail],
     ["9", replyMail],
   ]);
+
   const server = Bun.listen<{ buffer: string }>({
     hostname: "127.0.0.1",
     port: 0,
@@ -583,7 +675,9 @@ test("mail: fetch signs in with the password in ~/.netrc, keeps each message as 
 
           if (command.startsWith("LOGIN")) {
             socket.write(
-              command === 'LOGIN "me@example.com" "s3cret\\"q"' ? `${tag} OK\r\n` : `${tag} NO bad\r\n`,
+              command === 'LOGIN "me@example.com" "s3cret\\"q"'
+                ? `${tag} OK\r\n`
+                : `${tag} NO bad\r\n`,
             );
           } else if (command.startsWith("LIST")) {
             socket.write(
@@ -599,8 +693,8 @@ test("mail: fetch signs in with the password in ~/.netrc, keeps each message as 
             inbox = command === 'EXAMINE "INBOX"';
             socket.write(`* OK [UIDVALIDITY 5] UIDs valid\r\n${tag} OK\r\n`);
           } else if (command.startsWith("UID SEARCH")) {
-            // Like a real server, `n:*` past the last UID still matches the last message.
-            const from = parseInt(words[3] ?? "", 10);
+            // oxlint-disable-next-line unicorn/prefer-number-coercion -- parseInt reads the UID before `:*`, where Number gives NaN
+            const from = Number.parseInt(words[3] ?? "", 10);
             const uids = inbox ? [...messages.keys()] : [];
             const found = uids.filter((uid) => Number(uid) >= from);
             socket.write(
@@ -609,9 +703,12 @@ test("mail: fetch signs in with the password in ~/.netrc, keeps each message as 
           } else if (command.startsWith("UID FETCH")) {
             for (const [i, uid] of (words[2] ?? "").split(",").entries()) {
               const body = messages.get(uid) ?? "";
-              socket.write(`* ${i + 1} FETCH (UID ${uid} BODY[]<0> {${Buffer.byteLength(body)}}\r\n`);
+              socket.write(
+                `* ${i + 1} FETCH (UID ${uid} BODY[]<0> {${Buffer.byteLength(body)}}\r\n`,
+              );
               socket.write(`${body})\r\n`);
             }
+
             socket.write(`* 1 FETCH (FLAGS (\\Seen))\r\n${tag} OK\r\n`);
           } else {
             socket.write(`${tag} OK\r\n`);
@@ -620,11 +717,16 @@ test("mail: fetch signs in with the password in ~/.netrc, keeps each message as 
       },
     },
   });
-  onTestFinished(() => server.stop(true));
+
+  onTestFinished(() => {
+    server.stop(true);
+  });
+
   const netrc = folder({
     netrc:
       'machine other login x password y\nmachine 127.0.0.1\n  login me@example.com\n  password s3cret"q\n',
   });
+
   const previous = process.env["NETRC"];
   process.env["NETRC"] = `${netrc}/netrc`;
   onTestFinished(() => {

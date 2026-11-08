@@ -3,15 +3,15 @@ import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 
 import { event, thing } from "../src/schema.ts";
-import { defineSource, jsonl, type Source, writeJsonl } from "../src/source.ts";
+import { defineSource, jsonl, writeJsonl } from "../src/source.ts";
+import type { Source } from "../src/source.ts";
 
 export interface Chat {
   readonly guid: string;
   readonly name: string | null;
   readonly service: string | null;
   readonly group: boolean;
-  readonly handles: ReadonlyArray<string>;
-  /** A 1:1 chat Messages never made a row for, named after its one handle. */
+  readonly handles: readonly string[];
   readonly inferred: boolean;
 }
 
@@ -24,17 +24,14 @@ export interface Message {
   readonly text: string | null;
   readonly service: string;
   readonly attachments: boolean;
-  /** What a tapback, sticker or app message does to the message it points at. */
   readonly associated: {
     readonly kind: string;
     readonly removed: boolean;
     readonly to: string | null;
   } | null;
-  /** Filed under its sender's 1:1 chat because Messages joined it to none. */
   readonly inferred: boolean;
 }
 
-/** Messages files a 1:1 chat as `any;-;<handle>`, and some messages have no chat row of their own. */
 const oneToOne = (handle: string) => `'any;-;' || ${handle}`;
 
 const chatsSql = `
@@ -82,50 +79,58 @@ interface MessageRow {
 
 const appleEpoch = 978_307_200_000n;
 
-/** `message.date` counts from 2001-01-01 UTC: nanoseconds since macOS 10.13, seconds before. */
 const appleTime = (date: bigint): string =>
-  new Date(Number(appleEpoch + (date > 100_000_000_000n ? date / 1_000_000n : date * 1000n))).toISOString();
+  new Date(
+    Number(appleEpoch + (date > 100_000_000_000n ? date / 1_000_000n : date * 1000n)),
+  ).toISOString();
+
+const timezoneSlack = 86_400_000_000_000n;
 
 const appleDate = (iso: string): bigint => (BigInt(Date.parse(iso)) - appleEpoch) * 1_000_000n;
 
-/**
- * The plain text of an NSAttributedString typedstream: `NSString`, four header bytes, `+`, a length
- * (one byte below 0x80, or 0x81 + uint16 LE, or 0x82 + uint32 LE), then that many UTF-8 bytes.
- */
+const lengthWidths = new Map([
+  [0x81, 2],
+  [0x82, 4],
+]);
+
 const bodyText = (body: Uint8Array): string | null => {
   const bytes = Buffer.from(body);
   const plus = bytes.indexOf("NSString") + 12;
   const tag = bytes[plus + 1] ?? 0xff;
-  const width = tag < 0x80 ? 0 : tag === 0x81 ? 2 : tag === 0x82 ? 4 : null;
+  const width = tag < 0x80 ? 0 : lengthWidths.get(tag);
 
-  if (plus < 12 || bytes[plus] !== 0x2b || width === null) {
+  if (plus < 12 || bytes[plus] !== 0x2b || width === undefined) {
     return null;
   }
 
   const start = plus + 2 + width;
 
-  return bytes.toString("utf8", start, start + (width === 0 ? tag : bytes.readUIntLE(plus + 2, width)));
+  return bytes.toString(
+    "utf-8",
+    start,
+    start + (width === 0 ? tag : bytes.readUIntLE(plus + 2, width)),
+  );
 };
 
 const tapbacks = ["love", "like", "dislike", "laugh", "emphasize", "question", "emoji", "sticker"];
+
+const associationKinds = new Map([
+  [2, "app"],
+  [3, "app"],
+  [1000, "sticker"],
+]);
 
 const associationOf = (type: number, to: string | null): Message["associated"] =>
   type === 0
     ? null
     : {
         kind:
-          type === 2 || type === 3
-            ? "app"
-            : type === 1000
-              ? "sticker"
-              : type >= 2000 && type < 4000
-                ? (tapbacks[type % 1000] ?? "reaction")
-                : String(type),
+          associationKinds.get(type) ??
+          (type >= 2000 && type < 4000 ? (tapbacks[type % 1000] ?? "reaction") : String(type)),
         removed: type >= 3000 && type < 4000,
         to,
       };
 
-/** Every chat, and every message on or after `after` (Apple time), from a Messages database. */
 const read = (file: string, after: bigint) => {
   const db = new Database(file, { readonly: true, strict: true });
 
@@ -148,13 +153,15 @@ const read = (file: string, after: bigint) => {
         name: row.name,
         service: row.service,
         group: row.group === 1,
-        handles: JSON.parse(row.handles),
+        // SAFETY: chatsSql builds handles with json_group_array over handle IDs.
+        handles: JSON.parse(row.handles) as string[],
         inferred: row.inferred === 1,
       }));
+
     const messages = db
       .query<MessageRow, { after: bigint }>(messagesSql)
       .all({ after })
-      .flatMap((row): Array<Message> =>
+      .flatMap((row): Message[] =>
         row.chat === null
           ? []
           : [
@@ -180,16 +187,11 @@ const read = (file: string, after: bigint) => {
 };
 
 export interface IMessageOptions {
-  /** Messages that never leave Messages: they are dropped before the snapshot is written. */
   readonly drop?: (message: Message, chat: Chat | undefined) => boolean;
 }
 
-/**
- * Your iMessage and SMS conversations, read from the Messages database on this Mac (needs Full Disk Access).
- * A snapshot holds the chats and the new days' messages, or a whole `chat.db`, like a copy from an old Mac.
- */
 export const imessage = ({ drop }: IMessageOptions = {}): Source => {
-  const kept = (chats: ReadonlyArray<Chat>, messages: ReadonlyArray<Message>) => {
+  const kept = (chats: readonly Chat[], messages: readonly Message[]) => {
     const byGuid = new Map(chats.map((chat) => [chat.guid, chat]));
 
     return messages.filter((message) => drop?.(message, byGuid.get(message.chat)) !== true);
@@ -199,19 +201,20 @@ export const imessage = ({ drop }: IMessageOptions = {}): Source => {
     name: "imessage",
     watch: [`${homedir()}/Library/Messages/chat.db-wal`],
 
-    /** Starts a day before the last snapshot so no timezone can open a gap; repeats merge away by ID. */
     fetch: async ({ dir, since }) => {
-      const after = since === null ? 0n : appleDate(since) - 86_400_000_000_000n;
+      const after = since === null ? 0n : appleDate(since) - timezoneSlack;
       const { chats, messages } = read(`${homedir()}/Library/Messages/chat.db`, after);
 
       await writeJsonl(`${dir}/chats.jsonl`, chats);
       await writeJsonl(`${dir}/messages.jsonl`, kept(chats, messages));
     },
 
-    rows: async function* ({ dir }) {
+    async *rows({ dir }) {
       const whole = existsSync(`${dir}/chat.db`) ? read(`${dir}/chat.db`, 0n) : null;
       const chats = whole?.chats ?? (await Array.fromAsync(jsonl<Chat>(`${dir}/chats.jsonl`)));
-      const messages = whole === null ? jsonl<Message>(`${dir}/messages.jsonl`) : kept(chats, whole.messages);
+
+      const messages =
+        whole === null ? jsonl<Message>(`${dir}/messages.jsonl`) : kept(chats, whole.messages);
 
       for (const chat of chats) {
         yield thing({

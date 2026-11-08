@@ -1,8 +1,10 @@
-import { $ } from "bun";
 import { existsSync, readdirSync } from "node:fs";
 import { homedir } from "node:os";
 
-import { event, iso, link, type Row, thing } from "../src/schema.ts";
+import { $ } from "bun";
+
+import { event, iso, link, thing } from "../src/schema.ts";
+import type { Row } from "../src/schema.ts";
 import { defineSource, json, jsonl, writeJsonl } from "../src/source.ts";
 
 interface Issue {
@@ -72,16 +74,14 @@ interface Star {
     readonly description: string | null;
     readonly html_url: string;
     readonly language: string | null;
-    readonly topics: ReadonlyArray<string>;
+    readonly topics: readonly string[];
     readonly created_at: string;
   };
 }
 
 export interface GitHubOptions {
-  /** Folders holding your clones, searched four levels deep for commits. */
-  readonly clones?: ReadonlyArray<string>;
-  /** Who you are in `git log --author`: names, emails or patterns. Defaults to your git name and email and your GitHub login. */
-  readonly authors?: ReadonlyArray<string>;
+  readonly clones?: readonly string[];
+  readonly authors?: readonly string[];
 }
 
 const fields = {
@@ -91,34 +91,43 @@ const fields = {
 
 const day = (date: Date) => date.toISOString().slice(0, 10);
 
-/** GitHub search takes 30 requests a minute and refuses the rest, so a refused search waits out the minute and runs again. */
-const search = async (command: () => $.ShellPromise): Promise<string> => {
-  for (let tries = 1; ; tries++) {
-    const result = await command().quiet().nothrow();
+const trimmed = async (command: $.ShellPromise): Promise<string> => {
+  const output = await command.text();
+
+  return output.trim();
+};
+
+const search = async (command: () => Promise<$.ShellOutput>): Promise<string> => {
+  for (let tries = 1; ; tries += 1) {
+    const result = await command();
 
     if (result.exitCode === 0) {
       return result.stdout.toString();
     }
+
     if (tries === 5 || !result.stderr.toString().includes("rate limit")) {
       throw new Error(result.stderr.toString().trim());
     }
+
     await Bun.sleep(61_000);
   }
 };
 
-/** GitHub search stops at 1,000 results, so a range that fills up is searched again in halves. */
 const searchAll = async (
   kind: "prs" | "issues",
   login: string,
   from: Date,
   to: Date,
-): Promise<Array<Issue>> => {
-  const found = JSON.parse(
-    await search(
-      () =>
-        $`gh search ${kind} --author ${login} --created ${`${day(from)}..${day(to)}`} --limit 1000 --json ${fields[kind]}`,
-    ),
-  ) as Array<Issue>;
+): Promise<Issue[]> => {
+  const output = await search(
+    async () =>
+      await $`gh search ${kind} --author ${login} --created ${`${day(from)}..${day(to)}`} --limit 1000 --json ${fields[kind]}`
+        .quiet()
+        .nothrow(),
+  );
+
+  // SAFETY: `--json` asks for exactly the fields Issue declares.
+  const found = JSON.parse(output) as Issue[];
 
   if (found.length < 1000 || day(from) === day(to)) {
     return found;
@@ -132,22 +141,26 @@ const searchAll = async (
   ];
 };
 
-/** Every git clone under `roots`, as deep as `depth`. Folders this process may not read are passed over. */
-const findClones = (roots: ReadonlyArray<string>, depth = 4): Array<string> => {
-  const found: Array<string> = [];
+const findClones = (roots: readonly string[], depth = 4): string[] => {
+  const found: string[] = [];
+
   const walk = (dir: string, level: number) => {
-    let names: Array<string>;
+    let names: string[];
+
     try {
       names = readdirSync(dir, { withFileTypes: true })
         .filter((entry) => entry.isDirectory())
         .map((entry) => entry.name);
     } catch {
       console.error(`github: can't read ${dir}, skipping its clones`);
+
       return;
     }
+
     if (names.includes(".git")) {
       found.push(dir);
     }
+
     if (level < depth) {
       for (const child of names.filter((name) => name !== ".git" && name !== "node_modules")) {
         walk(`${dir}/${child}`, level + 1);
@@ -162,10 +175,11 @@ const findClones = (roots: ReadonlyArray<string>, depth = 4): Array<string> => {
   return found.toSorted();
 };
 
-/** Your commits in one clone, if its origin is on GitHub. */
-const commitsIn = async (clone: string, authors: ReadonlyArray<string>): Promise<Array<Commit>> => {
-  const remote = (await $`git -C ${clone} remote get-url origin`.quiet().nothrow().text()).trim();
-  const repo = /github\.com[:/]([\w.-]+\/[\w.-]+?)(\.git)?\/?$/.exec(remote)?.[1];
+const githubRemote = /github\.com[:/](?<repo>[\w.-]+\/[\w.-]+?)(?:\.git)?\/?$/u;
+
+const commitsIn = async (clone: string, authors: readonly string[]): Promise<Commit[]> => {
+  const remote = await trimmed($`git -C ${clone} remote get-url origin`.quiet().nothrow());
+  const repo = githubRemote.exec(remote)?.groups?.["repo"];
 
   if (repo === undefined) {
     return [];
@@ -178,11 +192,12 @@ const commitsIn = async (clone: string, authors: ReadonlyArray<string>): Promise
       .text();
 
   return log
-    .split("\x1e")
-    .map((record) => record.replace(/^\n/, ""))
+    .split("\u001E")
+    .map((record) => record.replace(/^\n/u, ""))
     .filter((record) => record !== "")
     .map((record) => {
-      const [sha = "", date = "", author = "", email = "", subject = "", body = ""] = record.split("\x1f");
+      const [sha = "", date = "", author = "", email = "", subject = "", body = ""] =
+        record.split("\u001F");
 
       return { sha, date, author, email, subject, body, repo, remote, path: clone };
     });
@@ -191,18 +206,109 @@ const commitsIn = async (clone: string, authors: ReadonlyArray<string>): Promise
 const lower = (name: string) => name.toLowerCase();
 
 const repoThing = (name: string): Row =>
-  thing({ id: `gh:repo:${lower(name)}`, kind: "repo", title: name, url: `https://github.com/${name}` });
+  thing({
+    id: `gh:repo:${lower(name)}`,
+    kind: "repo",
+    title: name,
+    url: `https://github.com/${name}`,
+  });
 
-/** `gh search` reports a pull request that was never closed with Go's zero time. */
 const closedAt = (value: string | null | undefined): string | null =>
   value === undefined || value === null || value.startsWith("0001-") ? null : iso(value);
 
 const has = (dir: string, file: string) => existsSync(`${dir}/${file}`);
 
-/**
- * Your pull requests and issues, the pull requests you reviewed with your reviews and inline comments,
- * your stars, and your commits in local clones of GitHub repos, through the GitHub CLI (`gh auth login`).
- */
+const reviewEvents = async function* reviewEvents(dir: string): AsyncGenerator<Row> {
+  if (!has(dir, "reviews.jsonl")) {
+    return;
+  }
+
+  const reviews = await Array.fromAsync(jsonl<Review>(`${dir}/reviews.jsonl`));
+  const comments = await Array.fromAsync(jsonl<ReviewComment>(`${dir}/review_comments.jsonl`));
+  const known = new Set(reviews.map((review) => review.id));
+  const orphan = comments.find((comment) => !known.has(comment.pull_request_review_id));
+
+  if (orphan !== undefined) {
+    throw new Error(
+      `review comment ${orphan.id} belongs to review ${orphan.pull_request_review_id}, which isn't in reviews.jsonl`,
+    );
+  }
+
+  const byReview = Map.groupBy(comments, (comment) => comment.pull_request_review_id);
+
+  for (const review of reviews) {
+    const inline = byReview.get(review.id) ?? [];
+
+    const said = [review.body, ...inline.map((comment) => comment.body)].filter(
+      (body) => body !== "",
+    );
+
+    yield event({
+      verb: "reviewed",
+      thing: `gh:pr:${lower(review.repo)}#${review.pr}`,
+      ts: iso(review.submitted_at),
+      text: said.length > 0 ? said.join("\n\n") : null,
+      key: `review:${review.id}`,
+      extra: {
+        state: review.state,
+        url: review.html_url,
+        commit: review.commit_id,
+        comments: inline.map((comment) => ({
+          id: comment.id,
+          path: comment.path,
+          line: comment.line,
+          in_reply_to: comment.in_reply_to_id ?? null,
+          url: comment.html_url,
+          created_at: comment.created_at,
+          body: comment.body,
+        })),
+      },
+    });
+  }
+};
+
+const commitEvents = async function* commitEvents(dir: string): AsyncGenerator<Row> {
+  if (!has(dir, "commits.jsonl")) {
+    return;
+  }
+
+  const bySha = new Map<string, { commit: Commit; repos: Set<string> }>();
+  const slugs = new Map<string, string>();
+
+  for await (const commit of jsonl<Commit>(`${dir}/commits.jsonl`)) {
+    if (/github\.com[:/]/u.test(commit.remote)) {
+      const repo = `gh:repo:${lower(commit.repo)}`;
+      const seen = bySha.get(commit.sha);
+
+      slugs.set(repo, commit.repo);
+
+      if (seen === undefined) {
+        bySha.set(commit.sha, { commit, repos: new Set([repo]) });
+      } else {
+        seen.repos.add(repo);
+      }
+    }
+  }
+
+  for (const name of slugs.values()) {
+    yield repoThing(name);
+  }
+
+  for (const { commit, repos } of bySha.values()) {
+    const sorted = [...repos].toSorted();
+
+    yield event({
+      verb: "committed",
+      thing: sorted[0] ?? "",
+      ts: iso(commit.date),
+      text:
+        commit.body.trim() === "" ? commit.subject : `${commit.subject}\n\n${commit.body.trim()}`,
+      key: `commit:${commit.sha}`,
+      extra: { author: commit.author, email: commit.email, repos: sorted },
+    });
+  }
+};
+
 export const github = ({
   clones = ["Developer", "Projects", "projects", "code", "src", "repos", "Documents/GitHub"].map(
     (dir) => `${homedir()}/${dir}`,
@@ -213,66 +319,69 @@ export const github = ({
     name: "github",
 
     fetch: async ({ dir }) => {
-      const login = (await $`gh api user --jq .login`.text()).trim();
-      const joined = new Date((await $`gh api user --jq .created_at`.text()).trim());
+      const login = await trimmed($`gh api user --jq .login`);
+      const joined = new Date(await trimmed($`gh api user --jq .created_at`));
       const now = new Date();
 
-      await Bun.write(`${dir}/prs.json`, JSON.stringify(await searchAll("prs", login, joined, now)));
-      await Bun.write(`${dir}/issues.json`, JSON.stringify(await searchAll("issues", login, joined, now)));
+      await Bun.write(
+        `${dir}/prs.json`,
+        JSON.stringify(await searchAll("prs", login, joined, now)),
+      );
+      await Bun.write(
+        `${dir}/issues.json`,
+        JSON.stringify(await searchAll("issues", login, joined, now)),
+      );
       await $`gh api user/starred --paginate -H ${"Accept: application/vnd.github.star+json"} --jq ${".[] | {starred_at, repo: .repo | {full_name, description, html_url, language, topics, created_at}}"} > ${Bun.file(`${dir}/stars.jsonl`)}`;
-
-      const reviewed = (
+      await Bun.write(
+        `${dir}/reviewed.jsonl`,
         await search(
-          () =>
-            $`gh api --paginate ${`search/issues?q=reviewed-by:${login}+type:pr&per_page=100`} --jq .items[]`,
-        )
-      )
-        .split("\n")
-        .filter((line) => line !== "")
-        .map((line) => JSON.parse(line) as Reviewed);
-      const reviews: Array<unknown> = [];
-      const comments: Array<unknown> = [];
-      const mine = `.[] | select(.user.login == "${login}")`;
+          async () =>
+            await $`gh api --paginate ${`search/issues?q=reviewed-by:${login}+type:pr&per_page=100`} --jq .items[]`
+              .quiet()
+              .nothrow(),
+        ),
+      );
 
-      for (const pr of reviewed) {
-        const repo = pr.repository_url.replace(/^.*\/repos\//, "");
-        const lines = async (path: string) =>
-          (await $`gh api --paginate ${path} --jq ${mine}`.text())
-            .split("\n")
-            .filter((line) => line !== "")
-            .map((line) => Object.assign({ repo, pr: pr.number }, JSON.parse(line)));
+      let reviews = "";
+      let comments = "";
 
-        reviews.push(...(await lines(`repos/${repo}/pulls/${pr.number}/reviews`)));
-        comments.push(...(await lines(`repos/${repo}/pulls/${pr.number}/comments`)));
+      for await (const pr of jsonl<Reviewed>(`${dir}/reviewed.jsonl`)) {
+        const repo = pr.repository_url.replace(/^.*\/repos\//u, "");
+        const mine = `.[] | select(.user.login == "${login}") | {repo: "${repo}", pr: ${pr.number}} + .`;
+
+        reviews +=
+          await $`gh api --paginate ${`repos/${repo}/pulls/${pr.number}/reviews`} --jq ${mine}`.text();
+        comments +=
+          await $`gh api --paginate ${`repos/${repo}/pulls/${pr.number}/comments`} --jq ${mine}`.text();
       }
 
-      await writeJsonl(`${dir}/reviewed.jsonl`, reviewed);
-      await writeJsonl(`${dir}/reviews.jsonl`, reviews);
-      await writeJsonl(`${dir}/review_comments.jsonl`, comments);
+      await Bun.write(`${dir}/reviews.jsonl`, reviews);
+      await Bun.write(`${dir}/review_comments.jsonl`, comments);
 
       const names = [
         login,
-        (await $`git config user.name`.quiet().nothrow().text()).trim(),
-        (await $`git config user.email`.quiet().nothrow().text()).trim(),
+        await trimmed($`git config user.name`.quiet().nothrow()),
+        await trimmed($`git config user.email`.quiet().nothrow()),
       ];
+
       const who = authors ?? names.filter((name) => name !== "");
-      const commits: Array<Commit> = [];
+      const commits: Commit[] = [];
 
       for (const clone of findClones(clones)) {
         commits.push(...(await commitsIn(clone, who)));
       }
+
       await writeJsonl(`${dir}/commits.jsonl`, commits);
     },
 
-    /** Snapshots from before a file was fetched simply don't have it. */
-    rows: async function* ({ dir }) {
+    async *rows({ dir }) {
       const mine = new Set<string>();
 
       for (const [kind, file] of [
         ["pr", "prs.json"],
         ["issue", "issues.json"],
       ] as const) {
-        for (const item of has(dir, file) ? await json<ReadonlyArray<Issue>>(`${dir}/${file}`) : []) {
+        for (const item of has(dir, file) ? await json<readonly Issue[]>(`${dir}/${file}`) : []) {
           const name = item.repository.nameWithOwner;
           const id = `gh:${kind}:${lower(name)}#${item.number}`;
 
@@ -285,7 +394,11 @@ export const github = ({
             text: item.body === "" ? null : item.body,
             url: item.url,
             created_at: iso(item.createdAt),
-            extra: { state: item.state, draft: item.isDraft ?? null, closed_at: closedAt(item.closedAt) },
+            extra: {
+              state: item.state,
+              draft: item.isDraft ?? null,
+              closed_at: closedAt(item.closedAt),
+            },
           });
           yield event({ verb: "opened", thing: id, ts: iso(item.createdAt) });
           yield link(id, "part_of", `gh:repo:${lower(name)}`);
@@ -294,7 +407,7 @@ export const github = ({
 
       if (has(dir, "reviewed.jsonl")) {
         for await (const pr of jsonl<Reviewed>(`${dir}/reviewed.jsonl`)) {
-          const name = pr.repository_url.replace(/^.*\/repos\//, "");
+          const name = pr.repository_url.replace(/^.*\/repos\//u, "");
           const id = `gh:pr:${lower(name)}#${pr.number}`;
 
           if (!mine.has(id)) {
@@ -316,84 +429,8 @@ export const github = ({
         }
       }
 
-      // One event per review. GitHub files every inline comment under a review, so comments ride on theirs.
-      if (has(dir, "reviews.jsonl")) {
-        const reviews = await Array.fromAsync(jsonl<Review>(`${dir}/reviews.jsonl`));
-        const comments = await Array.fromAsync(jsonl<ReviewComment>(`${dir}/review_comments.jsonl`));
-        const known = new Set(reviews.map((review) => review.id));
-        const orphan = comments.find((comment) => !known.has(comment.pull_request_review_id));
-
-        if (orphan !== undefined) {
-          throw new Error(
-            `review comment ${orphan.id} belongs to review ${orphan.pull_request_review_id}, which isn't in reviews.jsonl`,
-          );
-        }
-
-        const byReview = Map.groupBy(comments, (comment) => comment.pull_request_review_id);
-
-        for (const review of reviews) {
-          const inline = byReview.get(review.id) ?? [];
-          const said = [review.body, ...inline.map((comment) => comment.body)].filter((body) => body !== "");
-
-          yield event({
-            verb: "reviewed",
-            thing: `gh:pr:${lower(review.repo)}#${review.pr}`,
-            ts: iso(review.submitted_at),
-            text: said.length > 0 ? said.join("\n\n") : null,
-            key: `review:${review.id}`,
-            extra: {
-              state: review.state,
-              url: review.html_url,
-              commit: review.commit_id,
-              comments: inline.map((comment) => ({
-                id: comment.id,
-                path: comment.path,
-                line: comment.line,
-                in_reply_to: comment.in_reply_to_id ?? null,
-                url: comment.html_url,
-                created_at: comment.created_at,
-                body: comment.body,
-              })),
-            },
-          });
-        }
-      }
-
-      // One line per commit per clone, and forks share SHAs, so each SHA is one event, on the
-      // alphabetically first repo that has it; `extra.repos` lists them all.
-      if (has(dir, "commits.jsonl")) {
-        const bySha = new Map<string, { commit: Commit; repos: Set<string> }>();
-        const slugs = new Map<string, string>();
-
-        for await (const commit of jsonl<Commit>(`${dir}/commits.jsonl`)) {
-          if (/github\.com[:/]/.test(commit.remote)) {
-            const repo = `gh:repo:${lower(commit.repo)}`;
-            slugs.set(repo, commit.repo);
-            const seen = bySha.get(commit.sha);
-            if (seen === undefined) {
-              bySha.set(commit.sha, { commit, repos: new Set([repo]) });
-            } else {
-              seen.repos.add(repo);
-            }
-          }
-        }
-
-        for (const name of slugs.values()) {
-          yield repoThing(name);
-        }
-        for (const { commit, repos } of bySha.values()) {
-          const sorted = [...repos].toSorted();
-
-          yield event({
-            verb: "committed",
-            thing: sorted[0] ?? "",
-            ts: iso(commit.date),
-            text: commit.body.trim() === "" ? commit.subject : `${commit.subject}\n\n${commit.body.trim()}`,
-            key: `commit:${commit.sha}`,
-            extra: { author: commit.author, email: commit.email, repos: sorted },
-          });
-        }
-      }
+      yield* reviewEvents(dir);
+      yield* commitEvents(dir);
 
       if (has(dir, "stars.jsonl")) {
         for await (const star of jsonl<Star>(`${dir}/stars.jsonl`)) {
@@ -408,7 +445,12 @@ export const github = ({
             created_at: iso(star.repo.created_at),
             extra: { language: star.repo.language, topics: [...star.repo.topics] },
           });
-          yield event({ verb: "saved", thing: id, ts: iso(star.starred_at), collections: ["github stars"] });
+          yield event({
+            verb: "saved",
+            thing: id,
+            ts: iso(star.starred_at),
+            collections: ["github stars"],
+          });
         }
       }
     },
