@@ -11,6 +11,7 @@ export const repeatVerbs = [
   "charged",
   "paid",
   "sent",
+  "typed",
   "received",
   "committed",
   "reviewed",
