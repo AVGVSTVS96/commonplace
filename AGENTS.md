@@ -25,7 +25,12 @@ commonplace.config.ts   which sources, their rank, redaction
 
 ## Rules
 
-- `data/` is the user's private data: never commit it, and never edit or delete anything in `data/raw/`.
-- Read the archive only through the CLI or MCP, never the database file.
-- To add a source, follow `skills/add-source/SKILL.md`.
-- Public copy, examples and defaults are for anyone who copies the template, not the maintainer's setup: every browser, every mail provider, live services only.
+| Rule                                                                   | Enforced by                                                      |
+| ---------------------------------------------------------------------- | ---------------------------------------------------------------- |
+| No comments, no `any`, no unchecked type assertions                    | oxlint (`oxlint.config.ts`), in `check`                          |
+| `build.ts` is the only writer, `store.ts` the only reader              | the map above; `test/archive.test.ts`                            |
+| `data/` is never committed                                             | `.gitignore`                                                     |
+| Never edit or delete anything in `data/raw/`                           | judgment: it's the user's only copy                              |
+| Read the archive through the CLI or MCP, never the database file       | judgment                                                         |
+| A new source follows `skills/add-source/SKILL.md`                      | judgment                                                         |
+| Public copy, examples and defaults suit anyone who copies the template | judgment: every browser, every mail provider, live services only |

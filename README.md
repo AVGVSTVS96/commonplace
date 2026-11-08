@@ -22,7 +22,7 @@ commonplace      CLI ── search · timeline · show · stats
      └── mcp     Claude Code, Codex, Claude Desktop, any MCP client
 ```
 
-It's a template you own: about 1,300 lines in the core, plus one file per source. Bun and its built-in SQLite, with no runtime packages, in your own repo next to your own data. Read it in an afternoon. Change anything.
+It's a template you own: about 1,400 lines in the core, plus one file per source. Bun and its built-in SQLite, with no runtime packages, in your own repo next to your own data. Read it in an afternoon. Change anything.
 
 - **Agents write the sources.** The [`add-source`](skills/add-source/SKILL.md) skill has your coding agent write one for any app or export you have, run it and check what landed.
 - **One shape for everything.** Every source becomes things, events and links, with IDs derived from content, so the same page saved in two apps is one record.
@@ -93,7 +93,7 @@ import { mail } from "./sources/mail.ts";
 sources: [github(), prompts(), mail({ host: "imap.gmail.com", user: "you@gmail.com" })],
 ```
 
-`addresses` lists your other addresses, so mail from them counts as sent; `mailboxes` picks which to read. Mail is private: add `redact` rules for anything agents shouldn't read.
+`addresses` lists your other addresses, so mail from them counts as sent; `mailboxes` picks which to read; `name` names a second account's source. The password can also come from the file `$NETRC` names. Bridge on localhost takes `port: 1143, tls: false`. Mail is private: add `redact` rules for anything agents shouldn't read.
 
 ### Written by your agent
 
@@ -171,7 +171,8 @@ export default defineConfig({
   sources: [github(), prompts(), imessage()],
 
   // rows that never reach the database; their snapshots keep them
-  redact: (row) => row.type === "event" && /\b(password|api[_ -]?key|secret)\b/i.test(row.text ?? ""),
+  redact: (row) =>
+    row.type === "event" && /\b(?:password|api[_ -]?key|secret)\b/iu.test(row.text ?? ""),
 });
 ```
 

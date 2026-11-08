@@ -19,8 +19,8 @@ Check `sources/` first. Mail is built in for any IMAP provider: README.md's Mail
 ## Steps
 
 1. **Find the data.** Ask only what you can't discover. Prefer an official CLI or API the user is signed into, then a file or database the app keeps, then an export they download. No API or export you can automate (Instagram, LinkedIn): see [Sites without an API](#sites-without-an-api). A one-time export needs no `fetch`: copy it into `data/raw/<name>/<YYYY-MM-DD>/`.
-2. **Write `fetch`.** Save the service's output (JSON, JSONL, CSV) into `dir` as it came; reshaping is `rows`' job. For a long history, use `since` (the last snapshot's date) to take only what's new; overlap is free, as rows with the same ID merge. Throw on failure and the next sync retries.
-3. **Write `rows`** with the readers in `src/source.ts` and the builders in `src/schema.ts`.
+2. **Write `fetch`.** Save the service's output (JSON, JSONL, CSV) into `dir` as it came; reshaping is `rows`' job. For a long history, use `since` (the last snapshot's date) to take only what's new; overlap is free, as rows with the same ID merge. Throw on failure and the next sync retries; a fetch still running after 30 minutes fails. Keep cursors between runs in `state`, a private folder that never goes in a snapshot. Snapshots come daily; `every: 7` takes one a week, `every: 0.125` every 3 hours.
+3. **Write `rows`**, reading only its snapshot (no clock, no network), with the readers in `src/source.ts` and the builders in `src/schema.ts`.
    - **IDs come from content**, so every source names a thing the same way: `urlRef()` for any link, `gh:repo:owner/name`, `<service>:<kind>:<native id>`. Never a row number or a random ID. A repeatable event with no ID of its own gets `key: digest(...its fields)`.
    - **Verbs say what the user did**, not what the app calls it, from `src/schema.ts`. Add one only when none fits.
    - **Times are real or null**: `iso()` the source's own timestamp, never the fetch time or a guess.
