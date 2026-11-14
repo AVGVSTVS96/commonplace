@@ -22,12 +22,12 @@ commonplace      CLI ── search · timeline · show · stats
      └── mcp     Claude Code, Codex, Claude Desktop, any MCP client
 ```
 
-It's a template you own: about 1,400 lines in the core, plus one file per source. Bun and its built-in SQLite, with no runtime packages, in your own repo next to your own data. Read it in an afternoon. Change anything.
+It's a copy you own: about 1,400 lines in the core, plus one file per source. Bun and its built-in SQLite, with no runtime packages, in your own repo next to your own data. Read it in an afternoon. Change anything.
 
 - **Agents write the sources.** The [`add-source`](skills/add-source/SKILL.md) skill has your coding agent write one for any app or export you have, run it and check what landed.
 - **One shape for everything.** Every source becomes things, events and links, with IDs derived from content, so the same page saved in two apps is one record.
 - **Dated snapshots.** `commonplace sync` takes at most one snapshot per source per day, then rebuilds if anything is new. On a Mac, `commonplace install` runs it at login and when Messages changes, and the Claude Code plugin runs it when a session ends. Export sources update when you add a newer export.
-- **You choose what you collect and expose.** Data stays in your local `data/` folder, which the template keeps out of git. Connected agents can read everything in the built archive, and may send what they read to their model provider. `drop` keeps matching messages out of new snapshots; `redact` keeps rows out of the database, and the raw snapshots stay on disk.
+- **You choose what you collect and expose.** Data stays in your local `data/` folder, which git ignores. Connected agents can read everything in the built archive, and may send what they read to their model provider. `drop` keeps matching messages out of new snapshots; `redact` keeps rows out of the database, and the raw snapshots stay on disk.
 
 ## Sources
 
@@ -110,20 +110,17 @@ Anything with an export, a local database, an API or a CLI. Ask your agent, _"ad
 You need [Bun](https://bun.sh) and, for the GitHub source, the [GitHub CLI](https://cli.github.com) signed in. On a Mac, the iMessage source is on by default and needs Full Disk Access: give it to your terminal before the first sync (System Settings → Privacy & Security → Full Disk Access). X is off until you [sign in and add it](#x).
 
 ```sh
-gh repo create my-commonplace --template AVGVSTVS96/commonplace --private --clone
+git clone https://github.com/AVGVSTVS96/commonplace my-commonplace
 cd my-commonplace
+git remote rename origin upstream
+gh repo create my-commonplace --private --source . --push
 bun install
 bun add -g "$PWD"     # links `commonplace` into `bun pm bin -g`, which must be on your PATH
 commonplace sync
 commonplace install   # on a Mac: keep it current on its own
 ```
 
-It's a private copy, not a fork: forks of public repos are public, and your config and sources say a lot about you. To take updates:
-
-```sh
-git remote add upstream https://github.com/AVGVSTVS96/commonplace
-git pull upstream main --allow-unrelated-histories   # the first time; plain `git pull upstream main` after
-```
+It's a private copy, not a fork: forks of public repos are public, and your config and sources say a lot about you. It shares this repo's history, so updates merge cleanly: `git pull upstream main`.
 
 Then connect your agents:
 
@@ -171,8 +168,9 @@ export default defineConfig({
   sources: [github(), prompts(), imessage()],
 
   // rows that never reach the database; their snapshots keep them
+  // here, values shaped like secrets, not every message with the word "password"
   redact: (row) =>
-    row.type === "event" && /\b(?:password|api[_ -]?key|secret)\b/iu.test(row.text ?? ""),
+    row.type === "event" && /\b(?:password|api[_ -]?key|token)\s*[:=]\s*\S+/iu.test(row.text ?? ""),
 });
 ```
 
