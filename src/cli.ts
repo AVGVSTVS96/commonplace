@@ -9,6 +9,8 @@ import pkg from "../package.json";
 import { build, paths, report } from "./build.ts";
 import { install } from "./install.ts";
 import { serve } from "./mcp.ts";
+import { recall } from "./recall.ts";
+import type { Pointer } from "./recall.ts";
 import { open } from "./store.ts";
 import type { Hit, Store } from "./store.ts";
 import { sync } from "./sync.ts";
@@ -18,6 +20,7 @@ const usage = `commonplace: your personal data kit for agents
   commonplace search <query>     full-text search (FTS5 syntax works too)
   commonplace timeline           what you did, newest first  --since --until --verb
   commonplace show <id>          one record with its events and links
+  commonplace recall <query>     what agents said and did: the session file and line of each match  --since --until
   commonplace stats              sources, freshness, kinds, verbs
   commonplace sync               snapshot every source due today, then rebuild if anything is new
   commonplace install            sync on its own: at login, on new messages, when a hook kicks it (macOS)
@@ -32,6 +35,7 @@ const usage = `commonplace: your personal data kit for agents
 const root = path.dirname(import.meta.dir);
 const data = process.env["COMMONPLACE_DATA"] ?? `${root}/data`;
 const { db } = paths(data);
+const sessions = `${data}/recall.db`;
 
 const { values, positionals } = parseArgs({
   allowPositionals: true,
@@ -68,7 +72,21 @@ const lines = (hits: readonly Hit[]): string =>
     )
     .join("\n");
 
-const print = (value: ReturnType<Store["search"] | Store["stats"]>, text: () => string) => {
+const pointers = (hits: readonly Pointer[]): string =>
+  hits
+    .map((hit) =>
+      [
+        `${(hit.at ?? "").slice(0, 16).replace("T", " ")}  ${hit.agent}  ${hit.role}  ${hit.project ?? ""}`,
+        `  ${hit.file}:${hit.line}`,
+        `  ${hit.text}`,
+      ].join("\n"),
+    )
+    .join("\n\n");
+
+const print = (
+  value: ReturnType<Store["search"] | Store["stats"]> | readonly Pointer[],
+  text: () => string,
+) => {
   console.log(values.json === true ? JSON.stringify(value, null, 1) : text());
 };
 
@@ -76,6 +94,18 @@ switch (values.help === true ? "help" : (command ?? "help")) {
   case "search": {
     const hits = store().search(rest.join(" "), limit);
     print(hits, () => lines(hits));
+    break;
+  }
+
+  case "recall": {
+    if (!existsSync(sessions)) {
+      console.error(
+        "Indexing every agent session for the first time; later searches read only what's new.",
+      );
+    }
+
+    const hits = await recall(sessions, rest.join(" "), { ...values, limit });
+    print(hits, () => pointers(hits));
     break;
   }
 
@@ -140,16 +170,20 @@ switch (values.help === true ? "help" : (command ?? "help")) {
 
   case "mcp": {
     let current = { store: store(), at: statSync(db).mtimeMs };
-    await serve(() => {
-      const at = statSync(db).mtimeMs;
+    await serve(
+      () => {
+        const at = statSync(db).mtimeMs;
 
-      if (at !== current.at) {
-        current.store.close();
-        current = { store: store(), at };
-      }
+        if (at !== current.at) {
+          current.store.close();
+          current = { store: store(), at };
+        }
 
-      return current.store;
-    }, pkg.version);
+        return current.store;
+      },
+      pkg.version,
+      sessions,
+    );
     break;
   }
 

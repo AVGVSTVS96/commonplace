@@ -17,6 +17,7 @@ src/source.ts           defineSource and the readers: json, jsonl, lines, csv
 src/build.ts            replays every snapshot into the database; the only writer
 src/store.ts            every read
 src/sync.ts             today's snapshots, then a build if anything is new
+src/recall.ts           agent sessions read in place into data/recall.db, a word index of pointers
 src/install.ts          the macOS LaunchAgent, and the fixed binary (src/launcher.ts) it runs
 src/cli.ts, src/mcp.ts  the two doors, both through store.ts
 sources/<name>.ts       one file per source: fetch and rows
@@ -29,6 +30,7 @@ commonplace.config.ts   which sources, their rank, redaction
 | ---------------------------------------------------------------------- | ---------------------------------------------------------------- |
 | No comments, no `any`, no unchecked type assertions                    | oxlint (`oxlint.config.ts`), in `check`                          |
 | `build.ts` is the only writer, `store.ts` the only reader              | the map above; `test/archive.test.ts`                            |
+| `recall.ts` alone writes and reads `recall.db`, which holds no text    | `test/recall.test.ts`                                            |
 | `data/` is never committed                                             | `.gitignore`                                                     |
 | Never edit or delete anything in `data/raw/`                           | judgment: it's the user's only copy                              |
 | Read the archive through the CLI or MCP, never the database file       | judgment                                                         |

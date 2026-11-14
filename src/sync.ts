@@ -46,9 +46,7 @@ const alive = (pid: number): boolean => {
   }
 };
 
-const locked = async <T>(data: string, work: () => Promise<T>): Promise<T | null> => {
-  const lock = `${data}/sync.lock`;
-
+export const locked = async <T>(lock: string, work: () => Promise<T>): Promise<T | null> => {
   try {
     writeFileSync(lock, String(process.pid), { flag: "wx" });
   } catch {
@@ -58,7 +56,7 @@ const locked = async <T>(data: string, work: () => Promise<T>): Promise<T | null
 
     rmSync(lock, { force: true });
 
-    return await locked(data, work);
+    return await locked(lock, work);
   }
 
   try {
@@ -91,7 +89,7 @@ export const sync = async (
 ): Promise<Synced | null> => {
   mkdirSync(data, { recursive: true });
 
-  return await locked(data, async () => {
+  return await locked(`${data}/sync.lock`, async () => {
     const { raw, db } = paths(data);
     const date = today();
     const fetched: string[] = [];

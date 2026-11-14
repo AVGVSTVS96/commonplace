@@ -1,5 +1,6 @@
 import { createInterface } from "node:readline";
 
+import { recall } from "./recall.ts";
 import type { Json } from "./schema.ts";
 import type { Store } from "./store.ts";
 
@@ -13,6 +14,21 @@ const tools = [
       properties: {
         query: { type: "string" },
         limit: { type: "number", description: "Default 20" },
+      },
+      required: ["query"],
+    },
+  },
+  {
+    name: "recall",
+    description:
+      "Full-text search over the raw transcripts of every Claude Code, Codex and Pi session on this machine: what was typed, what the agent said, the tools it called and what they returned. Same query syntax as search. Returns pointers, one per session: the file and line of the best match, with a short excerpt. Open that line (sed -n '<line>p' <file>, or a few lines around it) before you claim what happened.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        query: { type: "string" },
+        since: { type: "string", description: "ISO date or time, inclusive" },
+        until: { type: "string", description: "ISO date or time, exclusive" },
+        limit: { type: "number", description: "Default 10" },
       },
       required: ["query"],
     },
@@ -52,7 +68,7 @@ const text = (value: unknown) => ({
   content: [{ type: "text", text: JSON.stringify(value, null, 1) }],
 });
 
-const call = (store: Store, name: string, args: Args) => {
+const call = async (store: Store, sessions: string, name: string, args: Args) => {
   // oxlint-disable-next-line anti-slop/no-runtime-typeof -- tool arguments are the client's JSON, read here
   const string = (key: string) => (typeof args[key] === "string" ? args[key] : undefined);
   // oxlint-disable-next-line anti-slop/no-runtime-typeof -- tool arguments are the client's JSON, read here
@@ -61,6 +77,16 @@ const call = (store: Store, name: string, args: Args) => {
   switch (name) {
     case "search": {
       return text(store.search(string("query") ?? "", number("limit")));
+    }
+
+    case "recall": {
+      return text(
+        await recall(sessions, string("query") ?? "", {
+          since: string("since"),
+          until: string("until"),
+          limit: number("limit"),
+        }),
+      );
     }
 
     case "timeline": {
@@ -114,8 +140,12 @@ const parse = (line: string): Request | null => {
   }
 };
 
-export const serve = async (latest: () => Store, version: string): Promise<void> => {
-  const result = (request: Request): object | null => {
+export const serve = async (
+  latest: () => Store,
+  version: string,
+  sessions: string,
+): Promise<void> => {
+  const result = async (request: Request): Promise<object | null> => {
     switch (request.method) {
       case "initialize": {
         return {
@@ -134,7 +164,12 @@ export const serve = async (latest: () => Store, version: string): Promise<void>
       }
 
       case "tools/call": {
-        return call(latest(), String(request.params?.name), request.params?.arguments ?? {});
+        return await call(
+          latest(),
+          sessions,
+          String(request.params?.name),
+          request.params?.arguments ?? {},
+        );
       }
 
       default: {
@@ -160,7 +195,7 @@ export const serve = async (latest: () => Store, version: string): Promise<void>
     }
 
     try {
-      const answer = result(request);
+      const answer = await result(request);
 
       send(
         request.id,

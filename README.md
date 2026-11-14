@@ -53,6 +53,18 @@ Unzip it into `data/raw/<source>/<YYYY-MM-DD>/` and the next sync reads it. Drop
 
 `prompts({ ssh: "you@server" })` reads another machine's sessions too, as a source of its own.
 
+### Agent sessions
+
+`commonplace recall <query>` searches everything your agents said and did: each Claude Code, Codex and Pi session on this machine, with the prompts, replies, tool calls and the first and last part of each tool's output. The transcripts are already on disk, so it doesn't copy them. It keeps a word index of them in `data/recall.db`, about 5% of their size, and reads only what's new before each search. A hit is a pointer, the session's file and line, for the agent to open before it says what happened:
+
+```
+2026-10-10 07:55  claude  agent  app
+  ~/.claude/projects/-home-you-app/4f1c09e2-….jsonl:347
+  Bash git worktree remove .claude/worktrees/fix-login && git branch -d fix-login …
+```
+
+The first search indexes every session, a minute or two per GB. To search another machine's sessions, run it there: `ssh you@server commonplace recall <query>`.
+
 ### X
 
 X's archive is a manual download that leaves out bookmarks, and its API is paid. So `x` reads your account the way x.com does, from a browser on your machine signed in as you, through [agent-browser](https://github.com/vercel-labs/agent-browser). It keeps each page as x.com sent it and takes only what's new.
@@ -137,12 +149,13 @@ launchctl kickstart gui/$(id -u)/dev.commonplace.sync
 command: commonplace   args: ["mcp"]
 ```
 
-Then ask something only your history can answer: _"What was that restaurant someone texted me about last spring?"_, _"What was I working on the week before my last trip?"_, _"Have I asked an agent about this before?"_
+Then ask something only your history can answer: _"What was that restaurant someone texted me about last spring?"_, _"What was I working on the week before my last trip?"_, _"Have I asked an agent about this before?"_, _"Which session fixed the signing error, and how?"_
 
 ## Use
 
 ```
 commonplace search <query>     full-text search (FTS5 syntax works too)
+commonplace recall <query>     what agents said and did: the session file and line of each match  --since --until
 commonplace timeline           what you did, newest first  --since --until --verb
 commonplace show <id>          one record with its events and links
 commonplace stats              sources, freshness, kinds, verbs
@@ -156,7 +169,7 @@ commonplace root               where this commonplace lives
 
 `--json` for machine-readable output, `--limit n` for how many.
 
-The MCP server has four tools, `search`, `timeline`, `show` and `stats`, over the same store as the CLI. An agent calls `stats` first to learn what it can ask for.
+The MCP server has five tools: `search`, `timeline`, `show` and `stats` over the same store as the CLI, and `recall` over agent sessions. An agent calls `stats` first to learn what it can ask for.
 
 ## Configure
 
@@ -189,6 +202,7 @@ src/source.ts     defineSource and the read helpers
 src/build.ts      replays every snapshot; the only writer
 src/store.ts      every read
 src/sync.ts       daily snapshots on demand, then the build
+src/recall.ts     the word index of agent sessions, read where they are
 src/install.ts    the LaunchAgent that runs sync on its own
 src/cli.ts        one door
 src/mcp.ts        the other
